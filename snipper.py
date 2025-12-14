@@ -21,24 +21,28 @@ from PIL import Image, ImageTk, ImageOps, ImageFilter
 # Chart digitizer (v4)
 from chart_digitizer.ui_dialog import ChartDigitizerDialog
 
-def _set_windows_dpi_awareness():
-    try:
-        import ctypes
-        # Prefer Per-Monitor V2 awareness (best behavior on Win10/11)
-        AWARENESS_CONTEXT_PER_MONITOR_AWARE_V2 = -4
-        ctypes.windll.user32.SetProcessDpiAwarenessContext(AWARENESS_CONTEXT_PER_MONITOR_AWARE_V2)
-        return
-    except Exception:
-        print('WARNING: call to ctypes.windll.user32.SetProcessDpiAwarenessContext failed')
-        pass
-    try:
-        import ctypes
-        # Fallback: system DPI aware
-        ctypes.windll.user32.SetProcessDPIAware()
-    except Exception:
-        print('WARNING: call to ctypes.windll.user32.SetProcessDPIAware failed')
+import ctypes
 
-_set_windows_dpi_awareness()
+SPI_GETWORKAREA = 0x0030
+
+class RECT(ctypes.Structure):
+    _fields_ = [("left", ctypes.c_long), ("top", ctypes.c_long),
+                ("right", ctypes.c_long), ("bottom", ctypes.c_long)]
+
+def get_work_area():
+    r = RECT()
+    ctypes.windll.user32.SystemParametersInfoW(SPI_GETWORKAREA, 0, ctypes.byref(r), 0)
+    return r.left, r.top, r.right, r.bottom
+
+def park_offscreen_workarea(win, pad=50):
+    win.update_idletasks()
+    w = win.winfo_width() or win.winfo_reqwidth()
+    h = win.winfo_height() or win.winfo_reqheight()
+    left, top, right, bottom = get_work_area()
+    # park just beyond the right/bottom edge
+    x = right + pad
+    y = bottom + pad
+    win.geometry(f"{w}x{h}+{x}+{y}")
 
 # -----------------------------
 # Tesseract discovery
@@ -734,16 +738,6 @@ class SettingsDialog(tk.Toplevel):
     def result(self):
         return self._result
 
-
-def _get_tk_scaling(root: "tk.Tk") -> float:
-    # Tk's scaling factor (points -> pixels) is approximately pixels_per_inch / 72
-    # This is generally the most stable way to preserve apparent sizing.
-    root.update_idletasks()
-    ppi = float(root.winfo_fpixels("1i"))   # pixels per inch for this window
-    return ppi / 72.0
-
-
-
 # -----------------------------
 # Main App
 # -----------------------------
@@ -753,7 +747,6 @@ class SnipOCRApp(tk.Tk):
         super().__init__()
         self.title("Data Snipper")
         self.geometry("980x720")
-        self._saved_scaling = _get_tk_scaling(self)
         self._saved_geometry = self.wm_geometry()
         self._dialogs = set()   # Track Toplevel dialogs we create
 
@@ -788,30 +781,23 @@ class SnipOCRApp(tk.Tk):
     #     self._dialogs.clear()
 
     def hide_main_window(self):
-        self._saved_scaling = _get_tk_scaling(self)
+        # Save exact current size+position
         self._saved_geometry = self.wm_geometry()
-        # self.withdraw()
-        self.iconify()
+
+        # Park off-screen (no withdraw/iconify)
+        park_offscreen_workarea(self)
         self.update_idletasks()
 
+
     def restore_main_window(self):
-        st = str(self.wm_state())
-        if st in ("iconic", "withdrawn"):
-            self.deiconify()
-            self.update_idletasks()
+        if getattr(self, "_saved_geometry", None):
+            self.wm_geometry(self._saved_geometry)
 
-        def _fix():
-            _set_windows_dpi_awareness()
-            if getattr(self, "_saved_scaling", None):
-                self.tk.call("tk", "scaling", float(self._saved_scaling))
-            if getattr(self, "_saved_geometry", None):
-                self.wm_geometry(self._saved_geometry)
-            self.lift()
-            self.focus_force()
-            self.update_idletasks()
-
-        self.after(100, _fix)
-
+        # Optional: bring forward if you want it visible immediately
+        # (Does not change WM state like deiconify does.)
+        self.lift()
+        self.focus_force()
+        self.update_idletasks()
 
     def begin_new_snip(self, mode='OCR'):
         # 1) close dialogs
