@@ -187,15 +187,15 @@ class ChartDigitizerDialog(tk.Toplevel):
             )
         elif mode == "xaxis":
             msg = (
-                "Set X ticks: Click any two locations on the chart corresponding horizontal tick positions (in pixels). "
+                "Set X ticks: Click any two tick positions on the vertical axis. "
                 "Then enter their values in the Calibration panel (x0 and x1) to the right. "
-                "These ticks define mapping from pixels to chart units for the X axis."
+                "These ticks define the mapping from image pixels to chart units for the X axis."
             )
         elif mode == "yaxis":
             msg = (
-                "Set Y ticks: CClick any two locations on the chart corresponding horizontal tick positions (in pixels). "
+                "Set Y ticks: Click any two tick positions on the vertical axis. "
                 "Then enter their values in the Calibration panel (y0 and y1) to the right. "
-                "These ticks define mapping from pixels to chart units for the Y axis."
+                "These ticks define the mapping from image pixels to chart units for the Y axis."
             )
         elif mode == "addseries":
             if chart_mode == "line":
@@ -203,7 +203,8 @@ class ChartDigitizerDialog(tk.Toplevel):
                     "Add series (Line): Click directly on a line in the chart to generate the series data. "
                     "The tool tracks the line from the clicked point across the rectangular region and samples it onto the X grid. "
                     "X step controls the output sampling grid in steps left and right from x0; missing samples are interpolated/flatlined. "
-                    "For example, if x-axis units are years, then X step = 0.25 will generate values for discrete years"
+                    "The color value set the threshold for matching the same color value. "
+                    "For example, if x-axis units are years, then X step = 0.25 will extract values at quarterly increments when you add series."
                 )
             else:
                 msg = (
@@ -437,23 +438,32 @@ class ChartDigitizerDialog(tk.Toplevel):
             return
 
         # drag edit point (line mode y only)
-        if mode == "edit" and self._drag_idx is not None and self._active_series_id is not None:
+        if mode == "editseries" and self._drag_idx is not None and self._active_series_id is not None:
             s = self._get_series(self._active_series_id)
             if not s:
                 return
-            if s.mode != "line":
-                return
-            # clamp y within ROI
-            _, y0, _, y1 = self._roi_px()
-            ypx = max(y0, min(y1, ypx))
-            # keep x fixed
-            x_fixed = s.px_points[self._drag_idx][0]
-            s.px_points[self._drag_idx] = (x_fixed, ypx)
-            # update data y
+
+            roi_x0, roi_y0, roi_x1, roi_y1 = self._roi_px()
+            xpx = max(roi_x0, min(roi_x1, xpx))
+            ypx = max(roi_y0, min(roi_y1, ypx))
+
             cal = self._build_calibration()
-            y_data = cal.y_px_to_data(ypx)
-            x_data = s.points[self._drag_idx][0]
-            s.points[self._drag_idx] = (x_data, float(y_data))
+
+            if s.mode == "line":
+                # keep x fixed
+                x_fixed = s.px_points[self._drag_idx][0]
+                s.px_points[self._drag_idx] = (x_fixed, ypx)
+
+                y_data = cal.y_px_to_data(ypx)
+                x_data = s.points[self._drag_idx][0]
+                s.points[self._drag_idx] = (x_data, float(y_data))
+
+            else:  # scatter
+                s.px_points[self._drag_idx] = (xpx, ypx)
+                x_data = cal.x_px_to_data(xpx)
+                y_data = cal.y_px_to_data(ypx)
+                s.points[self._drag_idx] = (float(x_data), float(y_data))
+
             self._update_tree_row(s)
             self._redraw_overlay()
 
@@ -464,7 +474,7 @@ class ChartDigitizerDialog(tk.Toplevel):
 
     def _on_right_click(self, event):
         # Toggle point enable (NA) in none mode
-        if self.tool_mode.get() != "edit" or self._active_series_id is None:
+        if self.tool_mode.get() != "editseries" or self._active_series_id is None:
             return
         xpx, ypx = self._to_image_px(event.x, event.y)
         s = self._get_series(self._active_series_id)
@@ -483,8 +493,6 @@ class ChartDigitizerDialog(tk.Toplevel):
             return
         s = self._get_series(self._active_series_id)
         if not s or not s.px_points:
-            return
-        if s.mode != "line":
             return
         idx = self._nearest_point_index(s.px_points, xpx, ypx, self._edit_radius)
         if idx is None:
