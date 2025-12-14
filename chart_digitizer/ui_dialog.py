@@ -5,6 +5,7 @@ import tkinter as tk
 from tkinter import ttk, filedialog, messagebox, simpledialog
 from typing import Callable, Optional, Tuple, List
 
+import bisect
 import numpy as np
 from PIL import Image, ImageTk
 
@@ -41,17 +42,20 @@ class ChartDigitizerDialog(tk.Toplevel):
         self.date_fmt = tk.StringVar(value="%Y")
 
         # Axis value entries
-        self.var_x0_val = tk.StringVar(value="")
-        self.var_x1_val = tk.StringVar(value="")
-        self.var_y0_val = tk.StringVar(value="")
-        self.var_y1_val = tk.StringVar(value="")
+        self.var_x0_val = tk.StringVar(value="0")
+        self.var_x1_val = tk.StringVar(value="100")
+        self.var_y0_val = tk.StringVar(value="0")
+        self.var_y1_val = tk.StringVar(value="100")
 
         self.var_x_step = tk.DoubleVar(value=1.0)
-        self.var_tol = tk.IntVar(value=30)
+        self.var_tol = tk.IntVar(value=20)
 
         # editing / selection
         self._active_series_id: Optional[int] = None
         self._drag_idx: Optional[int] = None  # point index in active series
+        self._drag_series_mode: Optional[str] = None  # "line" or "scatter" (used for post-drag resequencing)
+        self._toggle_dragging: bool = False
+        self._toggle_seen: set[int] = set()
         self._edit_radius = 8
 
         # axis click staging
@@ -105,6 +109,12 @@ class ChartDigitizerDialog(tk.Toplevel):
         self.canvas.bind("<ButtonRelease-1>", self._on_release)
         self.canvas.bind("<Motion>", self._on_motion)
         self.canvas.bind("<Button-3>", self._on_right_click)
+        self.canvas.bind("<Control-ButtonPress-1>", self._on_ctrl_toggle_press)
+        self.canvas.bind("<Control-B1-Motion>", self._on_ctrl_toggle_drag)
+        self.canvas.bind("<Control-ButtonRelease-1>", self._on_ctrl_toggle_release)
+        self.canvas.bind("<Control-ButtonPress-3>", self._on_ctrl_toggle_press)
+        self.canvas.bind("<Control-B3-Motion>", self._on_ctrl_toggle_drag)
+        self.canvas.bind("<Control-ButtonRelease-3>", self._on_ctrl_toggle_release)
 
         # Right panel: axis config
         ax = ttk.LabelFrame(right, text="Calibration", padding=8)
@@ -222,7 +232,8 @@ class ChartDigitizerDialog(tk.Toplevel):
             else:
                 msg = (
                     "Edit series (Scatter): Select a series in the table. Right-click toggles a point NA/disabled. "
-                    "Dragging is currently limited (scatter editing can be expanded later). "
+                    "Drag points to reposition. Right-click away from points inserts a new point (auto-sorted by X). "
+                    "Ctrl+drag (left or right button) toggles enable/NA for points you sweep over. "
                     "Edits affect exported CSV values."
                 )
         else:
@@ -423,6 +434,25 @@ class ChartDigitizerDialog(tk.Toplevel):
         # mode == none: edit points
         self._start_point_drag(xpx, ypx)
 
+
+    def _start_point_drag(self, xpx: int, ypx: int):
+        """Begin drag-editing a point in the active series (editseries mode only)."""
+        if self.tool_mode.get() != "editseries":
+            return
+        if self._active_series_id is None:
+            return
+
+        s = self._get_series(self._active_series_id)
+        if not s or not getattr(s, "px_points", None):
+            return
+
+        idx = self._nearest_point_index(s.px_points, xpx, ypx, getattr(self, "_edit_radius", 6))
+        if idx is None:
+            return
+
+        self._drag_idx = int(idx)
+        self._drag_series_mode = getattr(s, "mode", None)
+
     def _on_drag(self, event):
         xpx, ypx = self._to_image_px(event.x, event.y)
         mode = self.tool_mode.get()
@@ -466,38 +496,115 @@ class ChartDigitizerDialog(tk.Toplevel):
 
             self._update_tree_row(s)
             self._redraw_overlay()
-
     def _on_release(self, event):
         if self.tool_mode.get() == "roi":
             self._roi_dragging = False
-        self._drag_idx = None
 
+        # If we were dragging a scatter point, resequence by ascending X on release.
+        if self.tool_mode.get() == "editseries" and self._active_series_id is not None and self._drag_series_mode == "scatter":
+            s = self._get_series(self._active_series_id)
+            if s and s.points and s.px_points and len(s.points) == len(s.px_points):
+                order = sorted(range(len(s.points)), key=lambda i: (s.points[i][0], s.points[i][1]))
+                s.points = [s.points[i] for i in order]
+                s.px_points = [s.px_points[i] for i in order]
+                if s.point_enabled and len(s.point_enabled) == len(order):
+                    s.point_enabled = [s.point_enabled[i] for i in order]
+                self._update_tree_row(s)
+                self._redraw_overlay()
+
+        self._drag_idx = None
+        self._drag_series_mode = None
+        self._toggle_dragging = False
+        self._toggle_seen.clear()
     def _on_right_click(self, event):
-        # Toggle point enable (NA) in none mode
+        # Edit-series helpers:
+        # - Right-click on point: toggle enabled/NA state
+        # - Right-click away from points (scatter only): insert a new point at that location (sorted by X)
         if self.tool_mode.get() != "editseries" or self._active_series_id is None:
             return
+
         xpx, ypx = self._to_image_px(event.x, event.y)
         s = self._get_series(self._active_series_id)
-        if not s or not s.px_points:
+        if not s:
             return
-        idx = self._nearest_point_index(s.px_points, xpx, ypx, self._edit_radius)
+
+        # If we have points, check if this right-click hits a point
+        idx = None
+        if s.px_points:
+            idx = self._nearest_point_index(s.px_points, xpx, ypx, self._edit_radius)
+
         if idx is None:
+            # Insert new point for scatter series when clicking away from points
+            if s.mode != "scatter":
+                return
+
+            roi_x0, roi_y0, roi_x1, roi_y1 = self._roi_px()
+            xpx = max(roi_x0, min(roi_x1, xpx))
+            ypx = max(roi_y0, min(roi_y1, ypx))
+
+            cal = self._build_calibration()
+            x_data = float(cal.x_px_to_data(xpx))
+            y_data = float(cal.y_px_to_data(ypx))
+
+            if s.points is None:
+                s.points = []
+            if s.px_points is None:
+                s.px_points = []
+
+            # Ensure enabled flags exist
+            if not s.point_enabled:
+                s.point_enabled = [True] * len(s.points)
+
+            # Insert by x (stable if same x)
+            insert_at = 0
+            if s.points:
+                xs = [p[0] for p in s.points]
+                insert_at = int(bisect.bisect_left(xs, x_data))
+            s.points.insert(insert_at, (x_data, y_data))
+            s.px_points.insert(insert_at, (int(xpx), int(ypx)))
+            s.point_enabled.insert(insert_at, True)
+
+            self._update_tree_row(s)
+            self._redraw_overlay()
             return
+
+        # Toggle enable on an existing point
         if not s.point_enabled:
-            s.point_enabled = [True]*len(s.points)
+            s.point_enabled = [True] * len(s.points)
         s.point_enabled[idx] = not s.point_enabled[idx]
         self._redraw_overlay()
 
-    def _start_point_drag(self, xpx: int, ypx: int):
-        if self._active_series_id is None:
+    def _on_ctrl_toggle_press(self, event):
+        if self.tool_mode.get() != "editseries" or self._active_series_id is None:
             return
-        s = self._get_series(self._active_series_id)
+        self._toggle_dragging = True
+        self._toggle_seen.clear()
+        self._ctrl_toggle_at(event)
+
+    def _on_ctrl_toggle_drag(self, event):
+        if not self._toggle_dragging:
+            return
+        self._ctrl_toggle_at(event)
+
+    def _on_ctrl_toggle_release(self, event):
+        self._toggle_dragging = False
+        self._toggle_seen.clear()
+
+    def _ctrl_toggle_at(self, event):
+        xpx, ypx = self._to_image_px(event.x, event.y)
+        s = self._get_series(self._active_series_id) if (self._active_series_id is not None) else None
         if not s or not s.px_points:
             return
         idx = self._nearest_point_index(s.px_points, xpx, ypx, self._edit_radius)
         if idx is None:
             return
-        self._drag_idx = idx
+        if idx in self._toggle_seen:
+            return
+        self._toggle_seen.add(idx)
+        if not s.point_enabled:
+            s.point_enabled = [True] * len(s.points)
+        s.point_enabled[idx] = not s.point_enabled[idx]
+        self._redraw_overlay()
 
     def _nearest_point_index(self, pts: List[Tuple[int,int]], x: int, y: int, r: int) -> Optional[int]:
         r2 = r*r
@@ -571,7 +678,7 @@ class ChartDigitizerDialog(tk.Toplevel):
         cal = self._build_calibration()
 
         if s.mode == "scatter":
-            pts_px = extract_scatter_series(self._bgr, roi, s.color_bgr, tol)
+            pts_px = extract_scatter_series(self._bgr, roi, s.color_bgr, tol, seed_px=s.seed_px)
             s.px_points = pts_px
             s.points = [(cal.x_px_to_data(x), cal.y_px_to_data(y)) for (x,y) in pts_px]
             s.point_enabled = [True]*len(s.points)

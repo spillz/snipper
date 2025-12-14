@@ -602,29 +602,150 @@ def extract_scatter_series(
     roi: Tuple[int,int,int,int],
     target_bgr: Tuple[int,int,int],
     tol: int,
+    *,
+    seed_px: Optional[Tuple[int,int]] = None,
+    template_radius_px: int = 12,
+    min_area_px: int = 6,
+    split_overlaps: bool = True,
+    shape_filter: bool = True,
+    shape_match_thresh: float = 0.30,
 ) -> List[Tuple[int,int]]:
+    """
+    Extract scatter points inside ROI using a color mask, with optional overlap-splitting and
+    seed-guided shape filtering.
+
+    Notes
+    - Overlaps: connected components can merge adjacent markers. If split_overlaps=True we use a
+      distance-transform watershed to separate blobs into individual markers.
+    - Shapes: if seed_px is provided and falls in ROI, we build a marker template from a local
+      window around the seed and filter candidate components by cv2.matchShapes() similarity.
+      This improves robustness against text/line fragments and supports non-filled marker styles
+      (e.g., X/O) as long as the marker stroke color is within the mask.
+
+    Returns: list of (xpx, ypx) centroids in image pixel coordinates (sorted by x).
+    """
     require_cv2()
     import cv2
 
-    x0,y0,x1,y1 = roi
+    x0, y0, x1, y1 = roi
     roi_img = bgr[y0:y1, x0:x1]
-    mask = color_distance_mask(roi_img, target_bgr, tol).astype(np.uint8)*255
 
-    # clean
+    # Base color mask
+    mask = color_distance_mask(roi_img, target_bgr, tol).astype(np.uint8) * 255
+
+    # Light cleanup: remove isolated specks while keeping thin strokes.
     mask = cv2.medianBlur(mask, 3)
-    kernel = np.ones((3,3), np.uint8)
-    mask = cv2.morphologyEx(mask, cv2.MORPH_OPEN, kernel, iterations=1)
+    mask = cv2.morphologyEx(mask, cv2.MORPH_OPEN, np.ones((3,3), np.uint8), iterations=1)
 
-    num, labels, stats, centroids = cv2.connectedComponentsWithStats(mask, connectivity=8)
+    H, W = mask.shape[:2]
+
+    # ---------------- Seed template (optional) ----------------
+    tmpl_contour = None
+    if seed_px is not None:
+        sx, sy = seed_px
+        if (x0 <= sx < x1) and (y0 <= sy < y1):
+            sxl, syl = int(sx - x0), int(sy - y0)
+            r = int(max(4, template_radius_px))
+            xl = max(0, sxl - r); xr = min(W, sxl + r + 1)
+            yl = max(0, syl - r); yr = min(H, syl + r + 1)
+            win = mask[yl:yr, xl:xr]
+            if win.size:
+                # Keep the largest connected component in the window (seed marker should dominate).
+                nlab, labs, stats, _ = cv2.connectedComponentsWithStats((win > 0).astype(np.uint8), connectivity=8)
+                if nlab > 1:
+                    areas = stats[1:, cv2.CC_STAT_AREA]
+                    k = int(np.argmax(areas)) + 1
+                    comp = (labs == k).astype(np.uint8) * 255
+                    cnts, _hier = cv2.findContours(comp, cv2.RETR_EXTERNAL, cv2.CHAIN_APPROX_SIMPLE)
+                    if cnts:
+                        tmpl_contour = max(cnts, key=cv2.contourArea)
+
+    # ---------------- Overlap splitting (optional) ----------------
+    labels = None
+    if split_overlaps:
+        # Distance transform of foreground; peaks act as marker seeds.
+        fg = (mask > 0).astype(np.uint8)
+        if fg.any():
+            dist = cv2.distanceTransform(fg, cv2.DIST_L2, 5)
+
+            # Peak threshold: adaptive, but not too aggressive.
+            dmax = float(dist.max())
+            if dmax > 0:
+                peak_thresh = max(1.0, 0.45 * dmax)
+                peaks = (dist >= peak_thresh).astype(np.uint8) * 255
+                peaks = cv2.dilate(peaks, np.ones((3,3), np.uint8), iterations=1)
+
+                nmk, markers = cv2.connectedComponents(peaks)
+                # If we only have one marker (or none), watershed won't help—fallback to CCs below.
+                if nmk > 1:
+                    # sure background
+                    sure_bg = cv2.dilate(mask, np.ones((3,3), np.uint8), iterations=2)
+                    unknown = cv2.subtract(sure_bg, peaks)
+
+                    markers = markers.astype(np.int32) + 1
+                    markers[unknown > 0] = 0
+
+                    # watershed expects 3-channel image
+                    ws_img = roi_img.copy()
+                    markers = cv2.watershed(ws_img, markers)
+
+                    # markers: -1 boundary, 1 background, 2.. = objects
+                    labels = markers.copy()
+
     pts: List[Tuple[int,int]] = []
-    for i in range(1, num):
-        area = stats[i, cv2.CC_STAT_AREA]
-        if area < 4:
-            continue
-        cx, cy = centroids[i]
-        pts.append((x0 + int(round(cx)), y0 + int(round(cy))))
-    return pts
 
+    def _accept_contour(cnt) -> bool:
+        if cnt is None:
+            return True
+        if tmpl_contour is None or not shape_filter:
+            return True
+        try:
+            score = float(cv2.matchShapes(tmpl_contour, cnt, cv2.CONTOURS_MATCH_I1, 0.0))
+        except Exception:
+            return True
+        return score <= float(shape_match_thresh)
+
+    if labels is not None:
+        # Parse watershed labels (2..)
+        for lab in range(2, int(labels.max()) + 1):
+            comp = (labels == lab).astype(np.uint8) * 255
+            area = int(cv2.countNonZero(comp))
+            if area < min_area_px:
+                continue
+            cnts, _hier = cv2.findContours(comp, cv2.RETR_EXTERNAL, cv2.CHAIN_APPROX_SIMPLE)
+            if not cnts:
+                continue
+            cnt = max(cnts, key=cv2.contourArea)
+            if cv2.contourArea(cnt) < min_area_px:
+                continue
+            if not _accept_contour(cnt):
+                continue
+            M = cv2.moments(cnt)
+            if M["m00"] == 0:
+                continue
+            cx = int(M["m10"] / M["m00"])
+            cy = int(M["m01"] / M["m00"])
+            pts.append((x0 + cx, y0 + cy))
+    else:
+        # Connected components fallback
+        nlab, labs, stats, cents = cv2.connectedComponentsWithStats((mask > 0).astype(np.uint8), connectivity=8)
+        for lab in range(1, nlab):
+            area = int(stats[lab, cv2.CC_STAT_AREA])
+            if area < min_area_px:
+                continue
+            comp = (labs == lab).astype(np.uint8) * 255
+            cnts, _hier = cv2.findContours(comp, cv2.RETR_EXTERNAL, cv2.CHAIN_APPROX_SIMPLE)
+            cnt = max(cnts, key=cv2.contourArea) if cnts else None
+            if cnt is not None and cv2.contourArea(cnt) < min_area_px:
+                continue
+            if not _accept_contour(cnt):
+                continue
+            cx, cy = cents[lab]
+            pts.append((x0 + int(round(cx)), y0 + int(round(cy))))
+
+    # Stable order: by x then y
+    pts.sort(key=lambda p: (p[0], p[1]))
+    return pts
 def build_x_grid(xmin: float, xmax: float, step: float) -> List[float]:
     if step <= 0:
         raise ValueError("x_step must be > 0")

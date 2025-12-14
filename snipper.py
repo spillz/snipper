@@ -18,7 +18,6 @@ import pytesseract
 from pytesseract import Output
 from PIL import Image, ImageTk, ImageOps, ImageFilter
 
-# Chart digitizer (v4)
 from chart_digitizer.ui_dialog import ChartDigitizerDialog
 
 import ctypes
