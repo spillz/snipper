@@ -2,14 +2,20 @@
 
 A GUI application for scraping data from screengrabs that combines an OCR notepad and integrated tool to convert charts to data.
 
-<!-- IMAGE: Main app window -->
-![Main app window](images/main-window.png)
+Find a table, chart or text on screen that you want to capture as text or data and snip it
 
 <!-- IMAGE: Snipping overlay selection -->
 ![Snipping overlay](images/snipping-overlay.png)
 
+Text snips (including tables) get dropped immediately into a text notebook
+
+<!-- IMAGE: Main app window -->
+![Main app window](images/main-window.png)
+
+Chart snips allow you to pick out individual series for various chart type after following some simple setup steps. You can append the data in the notepad or save to CSV.
+
 <!-- IMAGE: OCR configuration -->
-![Chart snipping](images/OCR-config.png)
+![Chart snipping](images/chart-snip.png)
 
 
 ## Install
