@@ -1,8 +1,6 @@
-# Snipper: Snip text and data from screengrabs into a notepad
+# Data Snipper
 
-A lightweight Windows snipping utility written in Python. It lets you drag-select regions of the screen, runs OCR via Tesseract, and appends the extracted text into an editable notepad-style window. You can take multiple snips, clean up the output, and save the final text (or CSV output from table mode) to disk.
-
-## Screenshot Placeholders
+A GUI application for scraping data from screengrabs that combines an OCR notepad and integrated tool to convert charts to data.
 
 <!-- IMAGE: Main app window -->
 ![Main app window](images/main-window.png)
@@ -11,47 +9,60 @@ A lightweight Windows snipping utility written in Python. It lets you drag-selec
 ![Snipping overlay](images/snipping-overlay.png)
 
 <!-- IMAGE: OCR configuration -->
-![Snipping overlay](images/OCR-config.png)
+![Chart snipping](images/OCR-config.png)
 
----
 
-## Features
-
-- Interactive region selection (snip) over the full desktop
-- OCR results append into an editable text widget (combine multiple snips)
-- Save output to `.txt` (and optionally `.csv`)
-- Table mode emits CSV using bounding-box reconstruction (robust to spaces inside cells)
-- OCR presets (Paragraph / UI sparse / Numbers only / Table)
-- Custom presets via **Save As…**
-- Settings persist in user home folder (JSON)
-
----
-
-## Requirements
-
-- Windows 10/11 (primary target)
-- Python 3.11+ recommended (3.13 should work if your packages install cleanly)
-- Tesseract OCR engine installed (separate from Python packages)
-
-Python dependencies:
+## Install
 
 ```bash
 pip install mss pillow pytesseract
+pip install opencv-python
 ```
 
----
-
-## Installing Tesseract (Windows)
-
-This project uses the Tesseract **engine binary** (`tesseract.exe`) via the Python package `pytesseract`, which is only a wrapper and does not include the engine.
-
-Recommended Windows builds:
+Tesseract must be installed separately. On Windows, recommended builds:
 - https://github.com/UB-Mannheim/tesseract/wiki
 
-After installation, confirm it works:
+## Run
 
 ```bash
-tesseract --version
+python snipper.py
 ```
 
-Snipper will attempt to find your tesseract executable in the usual places. If not found, try adding the tesseract folder to your PATH.
+## Text snipping workflow
+
+1. Click **Text snip** and drag-select the region of text you wish to convert from image to text.
+2. The text will be appended to the end of the notebook
+3. If you don't like the output, delete it and try again.
+4. You can use the OCR settings panel to tune your output using tesseract configuation.
+
+<!-- IMAGE: OCR configuration -->
+![OCR configuration](images/OCR-config.png)
+
+## Chart snipping workflow
+
+1. Click **Chart snip** and drag-select the chart region.
+2. Setup the chart for scanning:
+   - Toolbar: **Set region**: The part of the chart that contains series data. Defaults to full snip image.
+   - Toolbar: **Set X axis**: click twice for any pair of x-axis tick marks; enter x0/x1 values. These do not restrict what is scanned only how values are converted from pixels to chart units.
+   - Toolbar: **Set Y axis**: click twice for any pair of y-axis pixels; enter y0/y1 values. These do not restrict what is scanned only how values are converted from pixels to chart units.
+   - Calibration: You can specify X and Y axis scales and optional date unit specifier for the X-axis (UNIX format: %Y=year, %m-%Y=month-year, %m/%d/%Y=month/day/year etc.)
+   - Output: **Set the x step**: The interval between series observations. This is a floating point number (default 1) in the units of the date fmt and you may specify partial units (e.g., 0.25 years = quarters)
+3. Toolbar: change tool to **Add series**: 
+   - click on the lines in the chart image to add one series at a time to the Series list. 
+   - You can edit the parameters above between clicks.
+3. Toolbar: change tool to **Edit series** to edit:
+   - Click on the individual series in the Series list
+   - Drag points vertically (line mode) to adjust values.
+   - Right-click a point to toggle NA (disabled).
+4. Series list
+   - Click series to change the active series
+   - Double click on series to change names
+   - Delete to drop the series (easy to add again via the "add series" tool)
+   - "Toggle on/off" to off excludes from notebook append or CSV export
+5. Export:
+   - **Append CSV** appends to the notepad in the main window.
+   - **Export CSV…** saves a CSV file.
+
+Notes:
+- Line charts export in **wide** format with a shared x-index.
+- Scatter charts export in **long** format of stacked series with x,y pairs.

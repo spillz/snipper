@@ -5,6 +5,7 @@ import json
 import time
 import shutil
 import statistics
+import traceback
 from dataclasses import dataclass, asdict
 from pathlib import Path
 
@@ -17,6 +18,27 @@ import pytesseract
 from pytesseract import Output
 from PIL import Image, ImageTk, ImageOps, ImageFilter
 
+# Chart digitizer (v4)
+from chart_digitizer.ui_dialog import ChartDigitizerDialog
+
+def _set_windows_dpi_awareness():
+    try:
+        import ctypes
+        # Prefer Per-Monitor V2 awareness (best behavior on Win10/11)
+        AWARENESS_CONTEXT_PER_MONITOR_AWARE_V2 = -4
+        ctypes.windll.user32.SetProcessDpiAwarenessContext(AWARENESS_CONTEXT_PER_MONITOR_AWARE_V2)
+        return
+    except Exception:
+        print('WARNING: call to ctypes.windll.user32.SetProcessDpiAwarenessContext failed')
+        pass
+    try:
+        import ctypes
+        # Fallback: system DPI aware
+        ctypes.windll.user32.SetProcessDPIAware()
+    except Exception:
+        print('WARNING: call to ctypes.windll.user32.SetProcessDPIAware failed')
+
+_set_windows_dpi_awareness()
 
 # -----------------------------
 # Tesseract discovery
@@ -416,8 +438,8 @@ class SnipOverlay(tk.Toplevel):
         self.canvas.bind("<ButtonPress-1>", self.on_mouse_down)
         self.canvas.bind("<B1-Motion>", self.on_mouse_drag)
         self.canvas.bind("<ButtonRelease-1>", self.on_mouse_up)
-        self.canvas.bind("<ButtonPress-3>", lambda e: self.cancel())
-        self.bind("<Escape>", lambda e: self.cancel())
+        self.canvas.bind("<ButtonPress-3>", lambda e: self.__cancel())
+        self.bind("<Escape>", lambda e: self.__cancel())
         self.focus_force()
 
     def on_mouse_down(self, event):
@@ -448,16 +470,20 @@ class SnipOverlay(tk.Toplevel):
         y2 = int(max(self.start_y, end_y))
 
         if (x2 - x1) < 5 or (y2 - y1) < 5:
-            self.cancel()
+            self.__cancel()
             return
 
         cropped = self.screenshot.crop((x1, y1, x2, y2))
-        try:
-            self.on_snip(cropped)
-        finally:
-            self.destroy()
 
-    def cancel(self):
+        # IMPORTANT: destroy the overlay (releases grab/focus) before invoking callbacks.
+        cb = self.on_snip
+        master = self.master
+        self.destroy()
+        if cb is not None and master is not None:
+            master.after(1, lambda: cb(cropped))
+        return
+
+    def __cancel(self):
         self.destroy()
 
 
@@ -480,16 +506,16 @@ class SettingsDialog(tk.Toplevel):
         self.var_preset = tk.StringVar(value=active_name)
 
         # Current editable working copy
-        self._working = self._clone_settings(presets[active_name])
+        self._iworking = self._clone_settings(presets[active_name])
 
         # UI vars
-        self.var_lang = tk.StringVar(value=self._working.lang)
-        self.var_psm = tk.IntVar(value=int(self._working.psm))
-        self.var_oem = tk.IntVar(value=int(self._working.oem))
-        self.var_preserve = tk.BooleanVar(value=bool(self._working.preserve_interword_spaces))
-        self.var_whitelist = tk.StringVar(value=self._working.whitelist or "")
-        self.var_blacklist = tk.StringVar(value=self._working.blacklist or "")
-        self.var_dpi = tk.StringVar(value=self._working.user_defined_dpi or "")
+        self.var_lang = tk.StringVar(value=self._iworking.lang)
+        self.var_psm = tk.IntVar(value=int(self._iworking.psm))
+        self.var_oem = tk.IntVar(value=int(self._iworking.oem))
+        self.var_preserve = tk.BooleanVar(value=bool(self._iworking.preserve_interword_spaces))
+        self.var_whitelist = tk.StringVar(value=self._iworking.whitelist or "")
+        self.var_blacklist = tk.StringVar(value=self._iworking.blacklist or "")
+        self.var_dpi = tk.StringVar(value=self._iworking.user_defined_dpi or "")
 
         self._build()
 
@@ -709,6 +735,15 @@ class SettingsDialog(tk.Toplevel):
         return self._result
 
 
+def _get_tk_scaling(root: "tk.Tk") -> float:
+    # Tk's scaling factor (points -> pixels) is approximately pixels_per_inch / 72
+    # This is generally the most stable way to preserve apparent sizing.
+    root.update_idletasks()
+    ppi = float(root.winfo_fpixels("1i"))   # pixels per inch for this window
+    return ppi / 72.0
+
+
+
 # -----------------------------
 # Main App
 # -----------------------------
@@ -716,8 +751,11 @@ class SettingsDialog(tk.Toplevel):
 class SnipOCRApp(tk.Tk):
     def __init__(self):
         super().__init__()
-        self.title("Snip OCR Notepad")
+        self.title("Data Snipper")
         self.geometry("980x720")
+        self._saved_scaling = _get_tk_scaling(self)
+        self._saved_geometry = self.wm_geometry()
+        self._dialogs = set()   # Track Toplevel dialogs we create
 
         self.active_preset, self.presets = load_config()
 
@@ -728,6 +766,70 @@ class SnipOCRApp(tk.Tk):
         except Exception as e:
             messagebox.showerror("Tesseract not configured", str(e))
 
+    def register_dialog(self, win: tk.Toplevel) -> None:
+        self._dialogs.add(win)
+        # Remove from set when destroyed
+        win.bind("<Destroy>", lambda _e, w=win: self._dialogs.discard(w), add="+")
+        if False:
+            # Also handle user closing via window manager
+            win.protocol("WM_DELETE_WINDOW", lambda w=win: self._safe_destroy(w))
+
+    def _safe_destroy(self, w: tk.Toplevel) -> None:
+        try:
+            if w.winfo_exists():
+                w.destroy()
+        except Exception:
+            pass
+
+    # def close_all_dialogs(self) -> None:
+    #     # Copy to avoid mutation during iteration
+    #     for w in list(self._dialogs):
+    #         self._safe_destroy(w)
+    #     self._dialogs.clear()
+
+    def hide_main_window(self):
+        self._saved_scaling = _get_tk_scaling(self)
+        self._saved_geometry = self.wm_geometry()
+        # self.withdraw()
+        self.iconify()
+        self.update_idletasks()
+
+    def restore_main_window(self):
+        st = str(self.wm_state())
+        if st in ("iconic", "withdrawn"):
+            self.deiconify()
+            self.update_idletasks()
+
+        def _fix():
+            _set_windows_dpi_awareness()
+            if getattr(self, "_saved_scaling", None):
+                self.tk.call("tk", "scaling", float(self._saved_scaling))
+            if getattr(self, "_saved_geometry", None):
+                self.wm_geometry(self._saved_geometry)
+            self.lift()
+            self.focus_force()
+            self.update_idletasks()
+
+        self.after(100, _fix)
+
+
+    def begin_new_snip(self, mode='OCR'):
+        # 1) close dialogs
+        for w in list(self.winfo_children()):
+            if isinstance(w, tk.Toplevel):
+                try: w.destroy()
+                except Exception: pass
+
+        self.hide_main_window()
+        self.update()
+
+        # 4) small delay before starting overlay/capture
+        #    (lets DWM finish the fade)
+        if mode=='OCR':
+            self.after(200, self.start_snip)   # try 50–120ms
+        elif mode=='CHART':
+            self.after(200, self.start_snip_chart)   # try 50–120ms
+
     def current_settings(self) -> OcrSettings:
         return self.presets[self.active_preset]
 
@@ -735,7 +837,8 @@ class SnipOCRApp(tk.Tk):
         toolbar = ttk.Frame(self, padding=(8, 8, 8, 4))
         toolbar.pack(side="top", fill="x")
 
-        ttk.Button(toolbar, text="New Snip (OCR)", command=self.start_snip).pack(side="left")
+        ttk.Button(toolbar, text="Chart Snip", command=lambda: self.begin_new_snip('CHART')).pack(side="left", padx=(8, 0))
+        ttk.Button(toolbar, text="Text Snip (OCR)", command=lambda: self.begin_new_snip('OCR')).pack(side="left")
         ttk.Button(toolbar, text="OCR Settings…", command=self.open_settings).pack(side="left", padx=(8, 0))
 
         # Show active preset name read-only (helps users trust what’s active)
@@ -807,10 +910,6 @@ class SnipOCRApp(tk.Tk):
 
         img = Image.frombytes("RGB", (shot.width, shot.height), shot.rgb)
 
-        # Hide main window to avoid capturing it (optional)
-        self.withdraw()
-        self.update_idletasks()
-
         def on_snip(cropped: Image.Image):
             self.set_status("Running OCR…")
             t0 = time.time()
@@ -836,11 +935,63 @@ class SnipOCRApp(tk.Tk):
 
         overlay = SnipOverlay(self, img, on_snip)
 
-        def restore(_event=None):
+        def restore(event=None):
+            if event is not None and event.widget is not overlay:
+                return
             try:
-                self.deiconify()
-                self.lift()
-                self.focus_force()
+                self.restore_main_window()
+            except Exception:
+                pass
+            if self.status_var.get().startswith("Capturing"):
+                self.set_status("Ready.")
+
+        overlay.bind("<Destroy>", restore)
+
+
+    def start_snip_chart(self):
+        """
+        Screen snip → open modeless ChartDigitizerDialog → append CSV into notepad on demand.
+        """
+        self.set_status("Capturing screen…")
+        with mss.mss() as sct:
+            mon0 = sct.monitors[0]
+            self._mss_mon0 = mon0
+            shot = sct.grab(mon0)
+
+        img = Image.frombytes("RGB", (shot.width, shot.height), shot.rgb)
+
+        def on_snip(cropped: Image.Image):
+            # Restore main window immediately (dialog is modeless)
+            try:
+                pass
+                # self.restore_main_window()
+            except Exception:
+                pass
+
+            def append_text(s: str):
+                if not s:
+                    return
+                if self.text.get("1.0", "end-1c").strip():
+                    self.text.insert("end", "\n\n")
+                self.text.insert("end", s)
+                self.text.see("end")
+                self.set_status("Chart CSV appended.")
+
+            try:
+                dlg = ChartDigitizerDialog(self, image=cropped, on_append_text=append_text)
+                self.register_dialog(dlg)
+                self.set_status("Chart digitizer opened.")
+            except Exception as e:
+                traceback.print_exc()
+                messagebox.showerror("Chart digitizer failed to open", "See console for traceback.")
+                self.set_status("Ready.")
+        overlay = SnipOverlay(self, img, on_snip)
+
+        def restore(event=None):
+            if event is not None and event.widget is not overlay:
+                return
+            try:
+                self.restore_main_window()
             except Exception:
                 pass
             if self.status_var.get().startswith("Capturing"):
