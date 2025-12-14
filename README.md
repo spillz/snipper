@@ -1,13 +1,13 @@
 # Data Snipper
 
-A GUI application for scraping data from screengrabs that combines an OCR notepad and integrated tool to convert charts to data.
+A GUI application for scraping text and data from screengrabs that combines an OCR notepad and an integrated tool to convert charts to data.
 
 Find a table, chart or text on screen that you want to capture as text or data and snip it
 
 <!-- IMAGE: Snipping overlay selection -->
 ![Snipping overlay](images/snipping-overlay.png)
 
-Text snips (including tables) get dropped immediately into a text notebook
+Text snips (including tables) get appended immediately into a text notebook, which you can hand tweak
 
 <!-- IMAGE: Main app window -->
 ![Main app window](images/main-window.png)
