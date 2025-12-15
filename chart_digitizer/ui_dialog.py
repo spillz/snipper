@@ -9,10 +9,14 @@ import bisect
 import numpy as np
 from PIL import Image, ImageTk
 
-from .cv_utils import require_cv2, pil_to_bgr
+from .cv_utils import require_cv2, pil_to_bgr, color_distance_mask
 from .model import ChartState, Series
 from .calibration import AxisScale, AxisCalibration, ChartCalibration
-from .extract import build_x_grid, build_x_grid_aligned, extract_line_series, extract_scatter_series, enforce_line_grid
+from .extract import (
+    build_x_grid, build_x_grid_aligned,
+    extract_line_series, extract_scatter_series, enforce_line_grid,
+    detect_runs_centers_along_x, detect_runs_centers_along_y,
+)
 from .export_csv import wide_csv_string, long_csv_string, write_wide_csv, write_long_csv
 
 
@@ -34,7 +38,11 @@ class ChartDigitizerDialog(tk.Toplevel):
 
         # Tool mode
         self.tool_mode = tk.StringVar(value="roi")  # edit|roi|xaxis|yaxis|addseries
-        self.chart_mode = tk.StringVar(value="line")  # line|scatter
+        self.chart_mode = tk.StringVar(value="line")  # line|scatter|column|bar|area
+        self.var_stacked = tk.BooleanVar(value=False)
+        self.var_stride = tk.StringVar(value="continuous")  # continuous|categorical
+        self.var_prefer_outline = tk.BooleanVar(value=True)
+
 
         # Axis scale types
         self.x_scale = tk.StringVar(value=AxisScale.LINEAR.value)
@@ -86,8 +94,31 @@ class ChartDigitizerDialog(tk.Toplevel):
 
         ttk.Separator(bar, orient="vertical").pack(side="left", fill="y", padx=10)
         ttk.Label(bar, text="Chart type:").pack(side="left")
-        ttk.Radiobutton(bar, text="Line", value="line", variable=self.chart_mode, command=self._on_chart_mode_change).pack(side="left", padx=(6,0))
-        ttk.Radiobutton(bar, text="Scatter", value="scatter", variable=self.chart_mode, command=self._on_chart_mode_change).pack(side="left", padx=(6,0))
+
+        chart_combo = ttk.Combobox(
+            bar, textvariable=self.chart_mode, state="readonly", width=10,
+            values=("line", "scatter", "column", "bar", "area")
+        )
+        chart_combo.pack(side="left", padx=(6,0))
+        chart_combo.bind("<<ComboboxSelected>>", lambda e: self._on_chart_mode_change())
+
+        ttk.Checkbutton(
+            bar, text="Stacked", variable=self.var_stacked,
+            command=self._on_chart_mode_change
+        ).pack(side="left", padx=(10,0))
+
+        ttk.Label(bar, text="Stride:").pack(side="left", padx=(10,0))
+        stride_combo = ttk.Combobox(
+            bar, textvariable=self.var_stride, state="readonly", width=11,
+            values=("continuous", "categorical")
+        )
+        stride_combo.pack(side="left", padx=(6,0))
+        stride_combo.bind("<<ComboboxSelected>>", lambda e: self._on_chart_mode_change())
+
+        ttk.Checkbutton(
+            bar, text="Prefer outline", variable=self.var_prefer_outline,
+            command=self._on_chart_mode_change
+        ).pack(side="left", padx=(10,0))
 
         # Loupe and Tip
         loupe_frm = ttk.Frame(left)
@@ -187,7 +218,7 @@ class ChartDigitizerDialog(tk.Toplevel):
 
     def _update_tip(self):
         mode = self.tool_mode.get()
-        chart_mode = self.chart_mode.get()  # line|scatter
+        chart_mode = self.chart_mode.get()  # line|scatter|column|bar|area
 
         if mode == "roi":
             msg = (
@@ -208,33 +239,53 @@ class ChartDigitizerDialog(tk.Toplevel):
                 "These ticks define the mapping from image pixels to chart units for the Y axis."
             )
         elif mode == "addseries":
-            if chart_mode == "line":
-                msg = (
-                    "Add series (Line): Click directly on a line in the chart to generate the series data. "
-                    "The tool tracks the line from the clicked point across the rectangular region and samples it onto the X grid. "
-                    "X step controls the output sampling grid in steps left and right from x0; missing samples are interpolated/flatlined. "
-                    "The color value set the threshold for matching the same color value. "
-                    "For example, if x-axis units are years, then X step = 0.25 will extract values at quarterly increments when you add series."
-                )
-            else:
+            if chart_mode == "scatter":
                 msg = (
                     "Add series (Scatter): Click a marker color to pick the series. "
                     "The tool detects colored marker blobs inside the region and exports their (x,y) coordinates. "
                     "X step is ignored in scatter mode."
                 )
-        elif mode == "editseries":
-            if chart_mode == "line":
+            elif chart_mode == "line":
                 msg = (
-                    "Edit series (Line): Select a series in the table, then drag points vertically to correct Y values "
-                    "(X is fixed to the sampling grid). Right-click a point to toggle NA/disabled. "
-                    "Edits affect exported CSV values."
+                    "Add series (Line): Click directly on a line in the chart to generate the series data. "
+                    "The tool tracks the line from the clicked point across the region and samples it onto the X grid. "
+                    "X step controls the output sampling grid; missing samples are interpolated/flatlined. "
+                    "Color tol controls how closely pixels must match the clicked color."
                 )
-            else:
+            elif chart_mode == "column":
+                msg = (
+                    "Add series (Column): Click inside a bar segment to pick its color. "
+                    "The tool reads the bar boundary (usually the outline) to estimate the value. "
+                    "Stride=Categorical auto-detects bar centers; Stride=Continuous samples on the X grid. "
+                    "Stacked indicates the series is a cumulative boundary; export can emit deltas between boundaries."
+                )
+            elif chart_mode == "bar":
+                msg = (
+                    "Add series (Bar): Click inside a horizontal bar segment to pick its color. "
+                    "The tool reads the bar boundary (usually the outline) to estimate the value. "
+                    "Stride=Categorical auto-detects bar centers along Y. "
+                    "Stacked indicates the series is a cumulative boundary; export can emit deltas between boundaries."
+                )
+            else:  # area
+                msg = (
+                    "Add series (Area): Click inside a filled area to pick its color. "
+                    "The tool reads the outer area boundary (usually the outline) to estimate the value. "
+                    "Stride=Continuous samples on the X grid; Stride=Categorical can auto-detect distinct x-runs."
+                )
+        elif mode == "editseries":
+            if chart_mode == "scatter":
                 msg = (
                     "Edit series (Scatter): Select a series in the table. Right-click toggles a point NA/disabled. "
                     "Drag points to reposition. Right-click away from points inserts a new point (auto-sorted by X). "
                     "Ctrl+drag (left or right button) toggles enable/NA for points you sweep over. "
                     "Edits affect exported CSV values."
+                )
+            else:
+                msg = (
+                    "Edit series: Select a series in the table, then drag points to correct values. "
+                    "For line/column/area, dragging is vertical only (X fixed to the sampling grid/category). "
+                    "For bars, dragging adjusts the bar length (X) while category position (Y) stays fixed. "
+                    "Right-click a point toggles NA/disabled. Edits affect exported CSV values."
                 )
         else:
             # fallback / none
@@ -339,7 +390,7 @@ class ChartDigitizerDialog(tk.Toplevel):
                 pts = [self._to_canvas(x, y) for (x, y) in s.px_points]
 
                 # polyline for line mode
-                if s.mode == "line" and len(pts) >= 2:
+                if s.mode in ("line","column","area","bar") and len(pts) >= 2:
                     flat = [v for xy in pts for v in xy]
 
                     # "halo" (understroke then overstoke)
@@ -479,14 +530,23 @@ class ChartDigitizerDialog(tk.Toplevel):
 
             cal = self._build_calibration()
 
-            if s.mode == "line":
-                # keep x fixed
+            if s.mode in ("line", "column", "area"):
+                # keep x fixed; adjust y only
                 x_fixed = s.px_points[self._drag_idx][0]
                 s.px_points[self._drag_idx] = (x_fixed, ypx)
 
                 y_data = cal.y_px_to_data(ypx)
                 x_data = s.points[self._drag_idx][0]
                 s.points[self._drag_idx] = (x_data, float(y_data))
+
+            elif s.mode == "bar":
+                # keep category position fixed (y); adjust length along x only
+                y_fixed = s.px_points[self._drag_idx][1]
+                s.px_points[self._drag_idx] = (xpx, y_fixed)
+
+                x_data = cal.x_px_to_data(xpx)
+                cat = s.points[self._drag_idx][0]
+                s.points[self._drag_idx] = (float(cat), float(x_data))
 
             else:  # scatter
                 s.px_points[self._drag_idx] = (xpx, ypx)
@@ -496,6 +556,7 @@ class ChartDigitizerDialog(tk.Toplevel):
 
             self._update_tree_row(s)
             self._redraw_overlay()
+            self._draw_loupe(xpx, ypx)
     def _on_release(self, event):
         if self.tool_mode.get() == "roi":
             self._roi_dragging = False
@@ -656,7 +717,15 @@ class ChartDigitizerDialog(tk.Toplevel):
         name = f"Series {sid}"
         mode = self.chart_mode.get()
 
-        s = Series(id=sid, name=name, color_bgr=target, mode=mode)
+        s = Series(
+            id=sid,
+            name=name,
+            color_bgr=target,
+            chart_kind=mode,
+            stacked=bool(self.var_stacked.get()),
+            stride_mode=str(self.var_stride.get()),
+            prefer_outline=bool(self.var_prefer_outline.get()),
+        )
         s.seed_px = (xpx, ypx)
         self.series.append(s)
         self._insert_tree_row(s)
@@ -671,89 +740,275 @@ class ChartDigitizerDialog(tk.Toplevel):
         self._redraw_overlay()
 
     def _extract_series(self, s: Series):
+        """
+        Populate s.px_points, s.points, s.point_enabled based on s.chart_kind.
+
+        - line: continuity-first line tracking sampled to an aligned X grid
+        - scatter: blob/marker detection
+        - column/area: boundary read (top/bottom vs baseline) sampled by stride mode
+        - bar: boundary read (left/right vs baseline) along categorical Y centers
+        """
         roi = self._roi_px()
         tol = int(self.var_tol.get())
-        s.color_bgr = s.color_bgr  # already set
-
         cal = self._build_calibration()
 
-        if s.mode == "scatter":
+        kind = getattr(s, "chart_kind", getattr(s, "mode", "line"))
+        stride = getattr(s, "stride_mode", "continuous")
+        prefer_outline = bool(getattr(s, "prefer_outline", True))
+
+        if s.seed_px is None:
+            raise ValueError("Series has no seed point. Click in the chart to create a series.")
+
+        # ---------------- Scatter ----------------
+        if kind == "scatter":
             pts_px = extract_scatter_series(self._bgr, roi, s.color_bgr, tol, seed_px=s.seed_px)
             s.px_points = pts_px
-            s.points = [(cal.x_px_to_data(x), cal.y_px_to_data(y)) for (x,y) in pts_px]
-            s.point_enabled = [True]*len(s.points)
+            s.points = [(float(cal.x_px_to_data(x)), float(cal.y_px_to_data(y))) for (x, y) in pts_px]
+            s.point_enabled = [True] * len(s.points)
             self._update_tree_row(s)
             return
 
-        # line mode: domain comes from ROI bounds, not x0/x1 anchor values
-        if False:
-            roi_xmin_px, _, roi_xmax_px, _ = self._roi_px()
+        # Helper: build a uint8 mask for this series inside ROI
+        require_cv2()
+        import cv2
 
+        x0, y0, x1, y1 = roi
+        roi_img = self._bgr[y0:y1, x0:x1]
+        m = color_distance_mask(roi_img, s.color_bgr, tol)
+        mask = (m.astype(np.uint8) * 255) if (m.dtype != np.uint8 or m.max() <= 1) else m.copy()
+
+        # Optional: prefer outline/edge pixels (useful for stroked bars/areas)
+        if prefer_outline:
+            er = cv2.erode((mask > 0).astype(np.uint8), np.ones((3, 3), np.uint8), iterations=1)
+            edge = ((mask > 0) & (er == 0)).astype(np.uint8) * 255
+            # if edge collapses (e.g., extremely thin fills), fall back to fill
+            if int(edge.sum()) > 0:
+                mask = edge
+
+        def _scan_col_edge(x_local: int, *, prefer_top: bool, y_hint_local: int | None, band: int = 10) -> int | None:
+            col = (mask[:, x_local] > 0)
+            if not np.any(col):
+                return None
+            if y_hint_local is not None:
+                lo = max(0, y_hint_local - band)
+                hi = min(mask.shape[0], y_hint_local + band + 1)
+                sl = col[lo:hi]
+                if np.any(sl):
+                    idx = np.where(sl)[0]
+                    return int(lo + (idx[0] if prefer_top else idx[-1]))
+            idx = np.where(col)[0]
+            return int(idx[0] if prefer_top else idx[-1])
+
+        def _scan_row_edge(y_local: int, *, prefer_left: bool, x_hint_local: int | None, band: int = 10) -> int | None:
+            row = (mask[y_local, :] > 0)
+            if not np.any(row):
+                return None
+            if x_hint_local is not None:
+                lo = max(0, x_hint_local - band)
+                hi = min(mask.shape[1], x_hint_local + band + 1)
+                sl = row[lo:hi]
+                if np.any(sl):
+                    idx = np.where(sl)[0]
+                    return int(lo + (idx[0] if prefer_left else idx[-1]))
+            idx = np.where(row)[0]
+            return int(idx[0] if prefer_left else idx[-1])
+
+        # ---------------- Line ----------------
+        if kind == "line":
+            x0_val = self._require_value(self.var_x0_val.get(), "x0")
+            roi_xmin_px, _, roi_xmax_px, _ = roi
             xmin = float(cal.x_px_to_data(roi_xmin_px))
             xmax = float(cal.x_px_to_data(roi_xmax_px))
-
             if xmin > xmax:
                 xmin, xmax = xmax, xmin
 
             step = float(self.var_x_step.get())
-            x_grid = build_x_grid(xmin, xmax, step)
+            x_grid = build_x_grid_aligned(xmin, xmax, step, anchor=x0_val)
 
-        x0_val = self._require_value(self.var_x0_val.get(), "x0")
-        x1_val = self._require_value(self.var_x1_val.get(), "x1")
-        # xmin = min(x0_val, x1_val)
-        # xmax = max(x0_val, x1_val)
+            xpx_grid = [int(round(cal.x_data_to_px(x))) for x in x_grid]
 
-        roi_xmin_px, _, roi_xmax_px, _ = self._roi_px()
+            px_pts, ypx_raw = extract_line_series(
+                self._bgr, roi, s.color_bgr, tol, xpx_grid,
+                seed_px=s.seed_px,
+            )
 
-        xmin = float(cal.x_px_to_data(roi_xmin_px))
-        xmax = float(cal.x_px_to_data(roi_xmax_px))
-        if xmin > xmax:
-            xmin, xmax = xmax, xmin
+            y_data_raw: List[Optional[float]] = []
+            for ypx in ypx_raw:
+                y_data_raw.append(None if ypx is None else float(cal.y_px_to_data(int(ypx))))
 
+            y0_val = self._require_value(self.var_y0_val.get(), "y0")
+            y1_val = self._require_value(self.var_y1_val.get(), "y1")
+            fallback_y = 0.5 * (y0_val + y1_val)
 
-        step = float(self.var_x_step.get())
-        x_grid = build_x_grid_aligned(xmin, xmax, step, anchor=x0_val)
-        
+            y_filled = enforce_line_grid(x_grid, y_data_raw, fallback_y=fallback_y)
 
-        # Convert to pixel x positions
-        xpx_grid = [int(round(cal.x_data_to_px(x))) for x in x_grid]
+            px_points: List[Tuple[int, int]] = []
+            for i, xpx in enumerate(xpx_grid):
+                if ypx_raw[i] is None:
+                    ypx = int(round(cal.y_data_to_px(y_filled[i])))
+                else:
+                    ypx = int(ypx_raw[i])
+                px_points.append((int(xpx), int(ypx)))
 
-        # Convert to pixel x positions
-        xpx_grid = [int(round(cal.x_data_to_px(x))) for x in x_grid]
+            s.px_points = px_points
+            s.points = [(float(x_grid[i]), float(y_filled[i])) for i in range(len(x_grid))]
+            s.point_enabled = [True] * len(s.points)
+            self._update_tree_row(s)
+            return
 
-        px_pts, ypx_raw = extract_line_series(
-            self._bgr, roi, s.color_bgr, tol, xpx_grid,
-            seed_px=s.seed_px,
-        )
-
-        # Convert ypx_raw to data y list aligned to x_grid
-        y_data_raw: List[Optional[float]] = []
-        for ypx in ypx_raw:
-            if ypx is None:
-                y_data_raw.append(None)
+        # ---------------- Column / Area (vertical) ----------------
+        if kind in ("column", "area"):
+            # Determine sampling xpx_grid
+            if stride == "categorical":
+                centers = detect_runs_centers_along_x(mask, min_run_px=2)
+                xpx_grid = [int(x0 + c) for c in centers]
+                x_grid = [float(cal.x_px_to_data(xpx)) for xpx in xpx_grid]
             else:
-                y_data_raw.append(float(cal.y_px_to_data(ypx)))
+                x0_val = self._require_value(self.var_x0_val.get(), "x0")
+                roi_xmin_px, _, roi_xmax_px, _ = roi
+                xmin = float(cal.x_px_to_data(roi_xmin_px))
+                xmax = float(cal.x_px_to_data(roi_xmax_px))
+                if xmin > xmax:
+                    xmin, xmax = xmax, xmin
+                step = float(self.var_x_step.get())
+                x_grid = build_x_grid_aligned(xmin, xmax, step, anchor=x0_val)
+                xpx_grid = [int(round(cal.x_data_to_px(x))) for x in x_grid]
 
-        # fallback y midpoint
-        y0_val = self._require_value(self.var_y0_val.get(), "y0")
-        y1_val = self._require_value(self.var_y1_val.get(), "y1")
-        fallback_y = 0.5 * (y0_val + y1_val)
+            # Baseline pixel for sign (prefer y=0 when in range; else use y0 axis pixel)
+            baseline_y_px = None
+            try:
+                y0px = int(round(cal.y_data_to_px(0.0)))
+                if y0 <= y0px <= y1:
+                    baseline_y_px = y0px
+            except Exception:
+                baseline_y_px = None
+            if baseline_y_px is None:
+                baseline_y_px = self._y_axis_px()[0]  # y0 tick (defaults to bottom ROI)
 
-        y_filled = enforce_line_grid(x_grid, y_data_raw, fallback_y=fallback_y)
+            sx, sy = s.seed_px
+            prefer_top = (sy < int(baseline_y_px))
 
-        # Ensure px_points aligned to x_grid (even if missing, place at midline)
-        px_points: List[Tuple[int,int]] = []
-        for i, xpx in enumerate(xpx_grid):
-            if ypx_raw[i] is None:
-                ypx = int(round(cal.y_data_to_px(y_filled[i])))
+            ypx_raw: List[Optional[int]] = []
+            px_points: List[Tuple[int, int]] = []
+            y_hint_local: Optional[int] = int(sy - y0) if (y0 <= sy < y1) else None
+
+            for xpx in xpx_grid:
+                if xpx < x0 or xpx >= x1:
+                    ypx_raw.append(None)
+                    continue
+                xc = int(xpx - x0)
+                y_local = _scan_col_edge(xc, prefer_top=prefer_top, y_hint_local=y_hint_local, band=12)
+                if y_local is None:
+                    ypx_raw.append(None)
+                    continue
+                ypx = int(y0 + y_local)
+                ypx_raw.append(ypx)
+                px_points.append((int(xpx), int(ypx)))
+                y_hint_local = int(y_local)
+
+            # Convert to data and optionally fill gaps (continuous stride only)
+            y_data_raw: List[Optional[float]] = []
+            for ypx in ypx_raw:
+                y_data_raw.append(None if ypx is None else float(cal.y_px_to_data(int(ypx))))
+
+            if stride == "continuous":
+                y0_val = self._require_value(self.var_y0_val.get(), "y0")
+                y1_val = self._require_value(self.var_y1_val.get(), "y1")
+                fallback_y = 0.5 * (y0_val + y1_val)
+                y_filled = enforce_line_grid(list(x_grid), y_data_raw, fallback_y=fallback_y)
+
+                # Ensure px_points aligned to x_grid
+                px_aligned: List[Tuple[int, int]] = []
+                for i, xpx in enumerate(xpx_grid):
+                    if ypx_raw[i] is None:
+                        ypx = int(round(cal.y_data_to_px(y_filled[i])))
+                    else:
+                        ypx = int(ypx_raw[i])
+                    px_aligned.append((int(xpx), int(ypx)))
+                s.px_points = px_aligned
+                s.points = [(float(x_grid[i]), float(y_filled[i])) for i in range(len(x_grid))]
+                s.point_enabled = [True] * len(s.points)
             else:
-                ypx = int(ypx_raw[i])
-            px_points.append((xpx, ypx))
+                # categorical: keep only detected points; no interpolation
+                pts: List[Tuple[float, float]] = []
+                en: List[bool] = []
+                pxs: List[Tuple[int, int]] = []
+                for i, xval in enumerate(x_grid):
+                    if y_data_raw[i] is None:
+                        continue
+                    pts.append((float(xval), float(y_data_raw[i])))
+                    en.append(True)
+                    pxs.append((int(xpx_grid[i]), int(ypx_raw[i])))
+                s.points = pts
+                s.point_enabled = en
+                s.px_points = pxs
 
-        s.px_points = px_points
-        s.points = [(x_grid[i], y_filled[i]) for i in range(len(x_grid))]
-        s.point_enabled = [True]*len(s.points)
-        self._update_tree_row(s)
+            self._update_tree_row(s)
+            return
+
+        # ---------------- Bar (horizontal) ----------------
+        if kind == "bar":
+            # For bars, categorical is the dominant case (categories along Y).
+            centers = detect_runs_centers_along_y(mask, min_run_px=2)
+            # Sort centers in display order (top->bottom). Categories typically go from top to bottom.
+            centers = sorted(centers)
+
+            ypx_grid = [int(y0 + c) for c in centers]
+            # category coordinate (x axis in exported table): use y-axis data coordinate of the category center
+            cat_grid = [float(cal.y_px_to_data(ypx)) for ypx in ypx_grid]
+
+            baseline_x_px = None
+            try:
+                x0px = int(round(cal.x_data_to_px(0.0)))
+                if x0 <= x0px <= x1:
+                    baseline_x_px = x0px
+            except Exception:
+                baseline_x_px = None
+            if baseline_x_px is None:
+                baseline_x_px = self._x_axis_px()[0]  # x0 tick (defaults to left ROI)
+
+            sx, sy = s.seed_px
+            prefer_right = (sx > int(baseline_x_px))
+
+            xpx_raw: List[Optional[int]] = []
+            px_points: List[Tuple[int, int]] = []
+            x_hint_local: Optional[int] = int(sx - x0) if (x0 <= sx < x1) else None
+
+            for ypx in ypx_grid:
+                if ypx < y0 or ypx >= y1:
+                    xpx_raw.append(None)
+                    continue
+                yc = int(ypx - y0)
+                x_local = _scan_row_edge(yc, prefer_left=(not prefer_right), x_hint_local=x_hint_local, band=12)
+                if x_local is None:
+                    xpx_raw.append(None)
+                    continue
+                xpx = int(x0 + x_local)
+                xpx_raw.append(xpx)
+                px_points.append((int(xpx), int(ypx)))
+                x_hint_local = int(x_local)
+
+            # Convert to values: x is bar value, category is cat_grid
+            pts: List[Tuple[float, float]] = []
+            en: List[bool] = []
+            pxs: List[Tuple[int, int]] = []
+
+            for i, cat in enumerate(cat_grid):
+                if xpx_raw[i] is None:
+                    continue
+                val = float(cal.x_px_to_data(int(xpx_raw[i])))
+                pts.append((float(cat), float(val)))
+                en.append(True)
+                pxs.append((int(xpx_raw[i]), int(ypx_grid[i])))
+
+            s.points = pts
+            s.point_enabled = en
+            s.px_points = pxs
+            self._update_tree_row(s)
+            return
+
+        raise ValueError(f"Unsupported chart kind: {kind}")
+
 
     def _require_value(self, s: str, label: str) -> float:
         s = (s or "").strip()
@@ -874,21 +1129,160 @@ class ChartDigitizerDialog(tk.Toplevel):
         self._update_tree_row(s)
 
     # ---------- Export ----------
+    def _prepare_wide_export(self, enabled: List[Series]) -> Tuple[List[float], List[Series]]:
+        """
+        Prepare x_grid and aligned per-series points for wide CSV export.
+
+        - For continuous stride (line/area/column), assumes series already aligned to a common x-grid.
+        - For categorical stride, clusters x positions across series into category bins and aligns each series
+          to those bins (handles grouped/overlapping bars with slight x offsets).
+        - For stacked charts, if series are marked stacked=True, emits deltas between successive boundaries.
+        """
+        if not enabled:
+            return [], []
+
+        # Separate scatter vs non-scatter
+        non_scatter = [s for s in enabled if getattr(s, "chart_kind", s.mode) != "scatter"]
+        if not non_scatter:
+            return [], []
+
+        # If every non-scatter series is already on a grid (line/continuous), use first series grid.
+        # Otherwise, build categorical bins.
+        any_categorical = any(getattr(s, "stride_mode", "continuous") == "categorical" for s in non_scatter)
+
+        if not any_categorical:
+            x_grid = [float(x) for (x, _y) in non_scatter[0].points]
+            # Ensure all series are aligned; if not, we still export as-is (best-effort).
+            return x_grid, non_scatter
+
+        # --- categorical binning ---
+        # Collect all x's; for horizontal bar extraction we stored category coordinate in x as well.
+        xs: List[float] = []
+        for s in non_scatter:
+            xs.extend([float(x) for (x, _y) in (s.points or [])])
+
+        xs = sorted(set(xs))
+        if not xs:
+            return [], non_scatter
+
+        # Cluster adjacent x's into bins to absorb within-category offsets.
+        if len(xs) == 1:
+            centers = [xs[0]]
+        else:
+            diffs = [abs(xs[i+1] - xs[i]) for i in range(len(xs)-1)]
+            diffs = [d for d in diffs if d > 0]
+            med = float(np.median(diffs)) if diffs else 1.0
+            thresh = 0.35 * med
+
+            centers: List[float] = []
+            cur = [xs[0]]
+            for v in xs[1:]:
+                if abs(v - cur[-1]) <= thresh:
+                    cur.append(v)
+                else:
+                    centers.append(float(np.mean(cur)))
+                    cur = [v]
+            centers.append(float(np.mean(cur)))
+
+        # Use ordinal categories 1..N for the exported x_grid (stable even if axis is purely labels).
+        x_grid = [float(i + 1) for i in range(len(centers))]
+
+        def nearest_bin(x: float) -> int:
+            j = int(np.argmin([abs(x - c) for c in centers]))
+            return j
+
+        aligned_series: List[Series] = []
+        for s in non_scatter:
+            y_by_bin: List[Optional[float]] = [None] * len(centers)
+            en_by_bin: List[bool] = [False] * len(centers)
+
+            # ensure point_enabled exists
+            pe = s.point_enabled if s.point_enabled else [True] * len(s.points)
+
+            for i, (x, y) in enumerate(s.points):
+                b = nearest_bin(float(x))
+                y_by_bin[b] = float(y)
+                en_by_bin[b] = bool(pe[i])
+
+            # Build a grid-aligned series (pad missing as 0 but disabled; wide_csv_string will write blank if disabled)
+            ss = Series(
+                id=s.id,
+                name=s.name,
+                color_bgr=s.color_bgr,
+                chart_kind=getattr(s, "chart_kind", s.mode),
+                stacked=bool(getattr(s, "stacked", False)),
+                stride_mode="categorical",
+                prefer_outline=bool(getattr(s, "prefer_outline", True)),
+                enabled=s.enabled,
+            )
+            ss.points = [(x_grid[i], 0.0 if y_by_bin[i] is None else float(y_by_bin[i])) for i in range(len(x_grid))]
+            ss.point_enabled = [bool(en_by_bin[i]) for i in range(len(x_grid))]
+            aligned_series.append(ss)
+
+        # --- stacked deltas (optional) ---
+        if any(getattr(s, "stacked", False) for s in aligned_series):
+            # Keep insertion order from enabled list for stacking
+            ordered = []
+            by_id = {s.id: s for s in aligned_series}
+            for s0 in non_scatter:
+                if s0.id in by_id:
+                    ordered.append(by_id[s0.id])
+
+            deltas: List[Series] = []
+            prev: Optional[Series] = None
+            for s in ordered:
+                if not getattr(s, "stacked", False):
+                    deltas.append(s)
+                    continue
+
+                ds = Series(
+                    id=s.id,
+                    name=s.name,
+                    color_bgr=s.color_bgr,
+                    chart_kind=s.chart_kind,
+                    stacked=s.stacked,
+                    stride_mode=s.stride_mode,
+                    prefer_outline=s.prefer_outline,
+                    enabled=s.enabled,
+                )
+                ds.points = []
+                ds.point_enabled = []
+                for i, (x, y) in enumerate(s.points):
+                    ok = bool(s.point_enabled[i]) if s.point_enabled else True
+                    if prev is None:
+                        ds.points.append((float(x), float(y)))
+                        ds.point_enabled.append(ok)
+                    else:
+                        ok_prev = bool(prev.point_enabled[i]) if prev.point_enabled else True
+                        ok2 = ok and ok_prev
+                        y_prev = float(prev.points[i][1])
+                        ds.points.append((float(x), float(y) - y_prev))
+                        ds.point_enabled.append(ok2)
+                deltas.append(ds)
+                prev = s
+
+            aligned_series = deltas
+
+        return x_grid, aligned_series
+
     def _append_csv(self):
         if not self.series:
             messagebox.showinfo("Append CSV", "No series to export yet. Use 'Add series' first.")
             return
-        mode = self.chart_mode.get()
-        enabled = [s for s in self.series if s.enabled]
 
-        if mode == "line":
-            # assume all line series use same x_grid (from first)
-            if not enabled:
-                return
-            x_grid = [x for (x, _) in enabled[0].points]
-            txt = wide_csv_string(x_grid, enabled)
-        else:
+        enabled = [s for s in self.series if s.enabled]
+        if not enabled:
+            return
+
+        # If every enabled series is scatter, export long; otherwise export wide.
+        if all(getattr(s, "chart_kind", s.mode) == "scatter" for s in enabled):
             txt = long_csv_string(enabled)
+        else:
+            x_grid, ser = self._prepare_wide_export(enabled)
+            if not x_grid or not ser:
+                messagebox.showinfo("Append CSV", "Nothing to export (no valid points).")
+                return
+            txt = wide_csv_string(x_grid, ser)
 
         self._on_append_text(txt)
 
@@ -896,10 +1290,12 @@ class ChartDigitizerDialog(tk.Toplevel):
         if not self.series:
             messagebox.showinfo("Export CSV", "No series to export yet. Use 'Add series' first.")
             return
+
         enabled = [s for s in self.series if s.enabled]
         if not enabled:
             messagebox.showinfo("Export CSV", "All series are disabled.")
             return
+
         path = filedialog.asksaveasfilename(
             parent=self,
             defaultextension=".csv",
@@ -907,11 +1303,16 @@ class ChartDigitizerDialog(tk.Toplevel):
         )
         if not path:
             return
-        if self.chart_mode.get() == "line":
-            x_grid = [x for (x, _) in enabled[0].points]
-            write_wide_csv(path, x_grid, enabled)
-        else:
+
+        if all(getattr(s, "chart_kind", s.mode) == "scatter" for s in enabled):
             write_long_csv(path, enabled)
+        else:
+            x_grid, ser = self._prepare_wide_export(enabled)
+            if not x_grid or not ser:
+                messagebox.showinfo("Export CSV", "Nothing to export (no valid points).")
+                return
+            write_wide_csv(path, x_grid, ser)
+
         messagebox.showinfo("Export CSV", f"Saved:\n{path}")
 
 def _parse_date_safe(s: str, fmt: str) -> float:

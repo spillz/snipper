@@ -781,3 +781,298 @@ def enforce_line_grid(
 ) -> List[float]:
     # y_vals already aligned to x_grid but may have None; fill with interpolation/flatline
     return _fill_missing_y(y_vals, fallback=fallback_y)
+
+
+# -----------------------------
+# Column / Bar / Area extraction
+# -----------------------------
+
+def _edge_mask_4n(mask: np.ndarray) -> np.ndarray:
+    """Return a thin edge/outline mask derived from a binary mask (uint8/bool)."""
+    m = (mask > 0)
+    # 4-neighbor erosion (interior pixels only)
+    up = np.zeros_like(m); up[1:,:] = m[:-1,:]
+    dn = np.zeros_like(m); dn[:-1,:] = m[1:,:]
+    lf = np.zeros_like(m); lf[:,1:] = m[:,:-1]
+    rt = np.zeros_like(m); rt[:,:-1] = m[:,1:]
+    er = m & up & dn & lf & rt
+    edge = m & (~er)
+    return edge.astype(np.uint8) * 255
+
+def _scan_column_for_edge(
+    mask: np.ndarray,
+    x_local: int,
+    *,
+    y0: int,
+    y1: int,
+    y_base_local: int,
+    prefer_top: bool,
+    max_gap_px: int = 2,
+) -> Optional[int]:
+    """
+    Scan a single x-column in mask[y0:y1, x_local] and return the OUTER boundary y (local coords),
+    scanning away from a baseline with short gap tolerance.
+
+    This is robust to combo charts where other series (lines) overwrite a few pixels inside the bar.
+    """
+    # Column slice in ROI-local coordinates
+    col = (mask[y0:y1, x_local] > 0)
+    H = int(col.shape[0])
+    if H <= 0 or (not np.any(col)):
+        return None
+
+    # Clamp baseline to this column's local slice coordinates
+    yb = int(y_base_local)
+    if yb < y0: yb = y0
+    if yb > (y1 - 1): yb = y1 - 1
+    yb_rel = yb - y0  # baseline relative to col[0]
+
+    direction = -1 if prefer_top else +1
+    y = int(yb_rel)
+    y_end = 0 if direction < 0 else (H - 1)
+
+    best: Optional[int] = None
+    gap = 0
+
+    # Walk outward; keep the farthest ON pixel, tolerate small OFF gaps.
+    while True:
+        if col[y]:
+            best = y
+            gap = 0
+        else:
+            if best is not None:
+                gap += 1
+                if gap > int(max_gap_px):
+                    break
+
+        if y == y_end:
+            break
+        y_next = y + direction
+        if y_next < 0 or y_next >= H:
+            break
+        y = y_next
+
+    if best is None:
+        return None
+
+    # Convert back to ROI-local mask coordinates (not absolute image coords)
+    return int(y0 + best)
+
+
+def _scan_column_for_edge_simple(
+    mask: np.ndarray,
+    x_local: int,
+    *,
+    y0: int,
+    y1: int,
+    prefer_top: bool,
+    y_hint: Optional[int] = None,
+    band: int = 8,
+) -> Optional[int]:
+    """
+    Scan a single x-column in mask[y0:y1, x_local] and return an edge y (in local coords).
+    If y_hint is provided, prefer a tight band around y_hint; fall back to full scan.
+    """
+    col = mask[y0:y1, x_local] > 0
+    if not np.any(col):
+        return None
+
+    # Tight band first if we have a hint
+    if y_hint is not None:
+        lo = max(0, (y_hint - y0) - band)
+        hi = min((y1 - y0), (y_hint - y0) + band + 1)
+        band_col = col[lo:hi]
+        if np.any(band_col):
+            idx = np.where(band_col)[0]
+            return int((lo + (idx[0] if prefer_top else idx[-1])))
+
+    idx = np.where(col)[0]
+    return int(idx[0] if prefer_top else idx[-1])
+
+
+def extract_filled_boundary_vertical(
+    bgr: np.ndarray,
+    roi: Tuple[int,int,int,int],
+    target_bgr: Tuple[int,int,int],
+    tol: int,
+    xpx_grid: List[int],
+    *,
+    seed_px: Tuple[int,int],
+    baseline_y_px: Optional[int] = None,
+    prefer_outline: bool = True,
+    band_px: int = 10,
+) -> Tuple[List[Tuple[int,int]], List[Optional[int]]]:
+    """
+    Extract the outer boundary (top for positive, bottom for negative) of a filled region
+    for each xpx in xpx_grid (column/area charts).
+    """
+    require_cv2()
+    x0, y0, x1, y1 = roi
+    mask = color_distance_mask(bgr, roi, target_bgr, tol)
+    if prefer_outline:
+        mask = _edge_mask_4n(mask)
+
+    sx, sy = seed_px
+    if baseline_y_px is None:
+        baseline_y_px = sy
+
+    prefer_top = (sy < baseline_y_px)  # positive-ish: boundary is towards smaller y
+
+    ypx_raw: List[Optional[int]] = []
+    px_points: List[Tuple[int,int]] = []
+
+    y_hint: Optional[int] = sy
+    for xpx in xpx_grid:
+        if xpx < x0 or xpx >= x1:
+            ypx_raw.append(None)
+            continue
+        xc = int(xpx - x0)
+
+    # Baseline in ROI-local mask coords (same coordinate system as y_local returned)
+    y_base_local = int(baseline_y_px - y0)
+    if y_base_local < 0: y_base_local = 0
+    if y_base_local > (y1 - y0 - 1): y_base_local = (y1 - y0 - 1)
+
+    for xpx in xpx_grid:
+        if xpx < x0 or xpx >= x1:
+            ypx_raw.append(None)
+            continue
+        xc = int(xpx - x0)
+
+        y_local = _scan_column_for_edge(
+            mask, xc,
+            y0=0, y1=(y1 - y0),
+            y_base_local=y_base_local,
+            prefer_top=prefer_top,
+            max_gap_px=2,   # <- increase to 3 if line strokes are thick/anti-aliased
+        )
+        if y_local is None:
+            ypx_raw.append(None)
+            continue
+
+        ypx = int(y0 + y_local)
+        ypx_raw.append(ypx)
+        px_points.append((int(xpx), int(ypx)))
+        # y_hint = ypx
+
+    return px_points, ypx_raw
+
+
+def _scan_row_for_edge(
+    mask: np.ndarray,
+    y_local: int,
+    *,
+    x0: int,
+    x1: int,
+    prefer_left: bool,
+    x_hint: Optional[int] = None,
+    band: int = 8,
+) -> Optional[int]:
+    row = mask[y_local, x0:x1] > 0
+    if not np.any(row):
+        return None
+
+    if x_hint is not None:
+        lo = max(0, (x_hint - x0) - band)
+        hi = min((x1 - x0), (x_hint - x0) + band + 1)
+        band_row = row[lo:hi]
+        if np.any(band_row):
+            idx = np.where(band_row)[0]
+            return int((lo + (idx[0] if prefer_left else idx[-1])))
+
+    idx = np.where(row)[0]
+    return int(idx[0] if prefer_left else idx[-1])
+
+
+def extract_filled_boundary_horizontal(
+    bgr: np.ndarray,
+    roi: Tuple[int,int,int,int],
+    target_bgr: Tuple[int,int,int],
+    tol: int,
+    ypx_grid: List[int],
+    *,
+    seed_px: Tuple[int,int],
+    baseline_x_px: Optional[int] = None,
+    prefer_outline: bool = True,
+    band_px: int = 10,
+) -> Tuple[List[Tuple[int,int]], List[Optional[int]]]:
+    """Extract the outer boundary (right for positive, left for negative) for horizontal bars."""
+    require_cv2()
+    x0, y0, x1, y1 = roi
+    mask = color_distance_mask(bgr, roi, target_bgr, tol)
+    if prefer_outline:
+        mask = _edge_mask_4n(mask)
+
+    sx, sy = seed_px
+    if baseline_x_px is None:
+        baseline_x_px = sx
+
+    prefer_right = (sx > baseline_x_px)
+
+    xpx_raw: List[Optional[int]] = []
+    px_points: List[Tuple[int,int]] = []
+
+    x_hint: Optional[int] = sx
+    for ypx in ypx_grid:
+        if ypx < y0 or ypx >= y1:
+            xpx_raw.append(None)
+            continue
+        yc = int(ypx - y0)
+
+        x_local = _scan_row_for_edge(
+            mask, yc,
+            x0=0, x1=(x1 - x0),
+            prefer_left=(not prefer_right),
+            x_hint=(x_hint - x0) if (x_hint is not None) else None,
+            band=band_px,
+        )
+        if x_local is None:
+            xpx_raw.append(None)
+            continue
+
+        xpx = int(x0 + x_local)
+        xpx_raw.append(xpx)
+        px_points.append((int(xpx), int(ypx)))
+        x_hint = xpx
+
+    return px_points, xpx_raw
+
+
+def detect_runs_centers_along_x(mask: np.ndarray, *, min_run_px: int = 2) -> List[int]:
+    """Detect contiguous x-runs where mask has any pixels, and return run centers (local x)."""
+    m = (mask > 0)
+    proj = np.any(m, axis=0).astype(np.uint8)
+    centers: List[int] = []
+    x = 0
+    n = proj.shape[0]
+    while x < n:
+        if proj[x] == 0:
+            x += 1
+            continue
+        x0 = x
+        while x < n and proj[x] != 0:
+            x += 1
+        x1 = x
+        if (x1 - x0) >= min_run_px:
+            centers.append(int(round((x0 + x1 - 1) / 2.0)))
+    return centers
+
+
+def detect_runs_centers_along_y(mask: np.ndarray, *, min_run_px: int = 2) -> List[int]:
+    """Detect contiguous y-runs where mask has any pixels, and return run centers (local y)."""
+    m = (mask > 0)
+    proj = np.any(m, axis=1).astype(np.uint8)
+    centers: List[int] = []
+    y = 0
+    n = proj.shape[0]
+    while y < n:
+        if proj[y] == 0:
+            y += 1
+            continue
+        y0 = y
+        while y < n and proj[y] != 0:
+            y += 1
+        y1 = y
+        if (y1 - y0) >= min_run_px:
+            centers.append(int(round((y0 + y1 - 1) / 2.0)))
+    return centers
