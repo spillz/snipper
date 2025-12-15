@@ -432,7 +432,10 @@ class SnipOverlay(tk.Toplevel):
         self.canvas.create_image(0, 0, image=self.photo, anchor="nw")
 
         # Dim overlay via stipple
-        self.canvas.create_rectangle(0, 0, self.width, self.height, fill="black", stipple="gray50", outline="")
+        self.dim_ids = [
+            self.canvas.create_rectangle(0, 0, 0, 0, fill="black", stipple="gray50", outline="")
+            for _ in range(4)
+        ]
 
         self.start_x = None
         self.start_y = None
@@ -444,6 +447,17 @@ class SnipOverlay(tk.Toplevel):
         self.canvas.bind("<ButtonPress-3>", lambda e: self.__cancel())
         self.bind("<Escape>", lambda e: self.__cancel())
         self.focus_force()
+
+    def _update_dim(self, x1, y1, x2, y2):
+        W, H = self.width, self.height
+        dims = [
+            (0, 0, W, y1),      # top
+            (0, y2, W, H),      # bottom
+            (0, y1, x1, y2),    # left
+            (x2, y1, W, y2),    # right
+        ]
+        for rid, (a, b, c, d) in zip(self.dim_ids, dims):
+            self.canvas.coords(rid, a, b, c, d)
 
     def on_mouse_down(self, event):
         self.start_x = self.canvas.canvasx(event.x)
@@ -457,9 +471,17 @@ class SnipOverlay(tk.Toplevel):
     def on_mouse_drag(self, event):
         if self.rect_id is None:
             return
+
         cur_x = self.canvas.canvasx(event.x)
         cur_y = self.canvas.canvasy(event.y)
-        self.canvas.coords(self.rect_id, self.start_x, self.start_y, cur_x, cur_y)
+
+        x1 = min(self.start_x, cur_x)
+        y1 = min(self.start_y, cur_y)
+        x2 = max(self.start_x, cur_x)
+        y2 = max(self.start_y, cur_y)
+
+        self.canvas.coords(self.rect_id, x1, y1, x2, y2)
+        self._update_dim(x1, y1, x2, y2)
 
     def on_mouse_up(self, event):
         if self.rect_id is None:
@@ -757,6 +779,7 @@ class SnipOCRApp(tk.Tk):
             ensure_tesseract_configured()
         except Exception as e:
             messagebox.showerror("Tesseract not configured", str(e))
+
 
     def register_dialog(self, win: tk.Toplevel) -> None:
         self._dialogs.add(win)
