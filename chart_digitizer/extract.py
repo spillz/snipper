@@ -185,6 +185,16 @@ def extract_line_series(
     if not seeds_local:
         seeds_local = [(W//2, H//2)]
 
+    # De-duplicate seeds by x; keep the first seen for each x.
+    seen_x = set()
+    dedup_seeds: List[Tuple[int,int]] = []
+    for x_s, y_s in seeds_local:
+        if x_s in seen_x:
+            continue
+        seen_x.add(x_s)
+        dedup_seeds.append((int(x_s), int(y_s)))
+    seeds_local = dedup_seeds or [(W // 2, H // 2)]
+
     seed_x_local = int(min(max(sx - x0, 0), W - 1)) if (x0 <= sx < x1) else W // 2
     start_seed = min(seeds_local, key=lambda s: abs(s[0] - seed_x_local))
     cur_x, cur_y = start_seed
@@ -337,19 +347,54 @@ def extract_line_series(
             xc += step
 
     # --- Build dense trace ---
-    cur_y = start_seed[1]
-    recent = [(start_seed[0], start_seed[1])]
-    y_by_x[start_seed[0]] = start_seed[1]
-
-    if start_seed[0] + 1 < W:
+    seeds_sorted = sorted(seeds_local, key=lambda s: s[0])
+    if len(seeds_sorted) == 1:
         cur_y = start_seed[1]
         recent = [(start_seed[0], start_seed[1])]
-        track_direction(start_seed[0] + 1, W, +1)
+        y_by_x[start_seed[0]] = start_seed[1]
 
-    if start_seed[0] - 1 >= 0:
-        cur_y = start_seed[1]
-        recent = [(start_seed[0], start_seed[1])]
-        track_direction(start_seed[0] - 1, -1, -1)
+        if start_seed[0] + 1 < W:
+            cur_y = start_seed[1]
+            recent = [(start_seed[0], start_seed[1])]
+            track_direction(start_seed[0] + 1, W, +1)
+
+        if start_seed[0] - 1 >= 0:
+            cur_y = start_seed[1]
+            recent = [(start_seed[0], start_seed[1])]
+            track_direction(start_seed[0] - 1, -1, -1)
+    else:
+        for i, (sx_l, sy_l) in enumerate(seeds_sorted):
+            if i == 0:
+                left_limit = 0
+            else:
+                left_limit = int(math.floor((seeds_sorted[i - 1][0] + sx_l) / 2.0)) + 1
+            if i == len(seeds_sorted) - 1:
+                right_limit = W - 1
+            else:
+                right_limit = int(math.floor((sx_l + seeds_sorted[i + 1][0]) / 2.0))
+
+            if left_limit < 0:
+                left_limit = 0
+            if right_limit > (W - 1):
+                right_limit = W - 1
+            if left_limit > sx_l:
+                left_limit = sx_l
+            if right_limit < sx_l:
+                right_limit = sx_l
+
+            cur_y = int(sy_l)
+            recent = [(int(sx_l), int(sy_l))]
+            y_by_x[int(sx_l)] = int(sy_l)
+
+            if sx_l + 1 <= right_limit:
+                cur_y = int(sy_l)
+                recent = [(int(sx_l), int(sy_l))]
+                track_direction(int(sx_l) + 1, right_limit + 1, +1)
+
+            if sx_l - 1 >= left_limit:
+                cur_y = int(sy_l)
+                recent = [(int(sx_l), int(sy_l))]
+                track_direction(int(sx_l) - 1, left_limit - 1, -1)
 
     # --- Sample dense trace at requested xpx_grid ---
     ypx_raw: List[Optional[int]] = []

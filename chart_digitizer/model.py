@@ -36,6 +36,8 @@ class Series:
 
     # Optional seed pixel (set when user clicks the chart)
     seed_px: Optional[Tuple[int, int]] = None
+    # Optional extra seed pixels for improved tracking (Ctrl+click)
+    extra_seeds_px: List[Tuple[int, int]] = field(default_factory=list)
 
     # data points (x,y) in chart units; for grid-based kinds these align to x_grid/categories
     points: List[Tuple[float, float]] = field(default_factory=list)

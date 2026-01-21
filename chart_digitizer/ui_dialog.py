@@ -250,7 +250,8 @@ class ChartDigitizerDialog(tk.Toplevel):
                     "Add series (Line): Click directly on a line in the chart to generate the series data. "
                     "The tool tracks the line from the clicked point across the region and samples it onto the X grid. "
                     "X step controls the output sampling grid; missing samples are interpolated/flatlined. "
-                    "Color tol controls how closely pixels must match the clicked color."
+                    "Color tol controls how closely pixels must match the clicked color. "
+                    "Ctrl+click adds detection seeds (shown as cyan rings) and rebuilds the line trace."
                 )
             elif chart_mode == "column":
                 msg = (
@@ -421,6 +422,22 @@ class ChartDigitizerDialog(tk.Toplevel):
                         self.canvas.create_oval(cx-r, cy-r, cx+r, cy+r,
                                                 fill="#666", outline="",
                                                 tags=("overlay","pt",f"pt_{i}"))
+            # detection seed markers
+            if s and (s.seed_px or s.extra_seeds_px):
+                seeds = []
+                if s.seed_px:
+                    seeds.append((s.seed_px, "#00B4FF"))
+                for ex in (s.extra_seeds_px or []):
+                    seeds.append((ex, "#00E5FF"))
+                for (sx, sy), color in seeds:
+                    cx, cy = self._to_canvas(int(sx), int(sy))
+                    r = 5
+                    self.canvas.create_oval(cx-r, cy-r, cx+r, cy+r,
+                                            outline="black", width=2, fill="",
+                                            tags=("overlay","seed"))
+                    self.canvas.create_oval(cx-(r-1), cy-(r-1), cx+(r-1), cy+(r-1),
+                                            outline=color, width=2, fill="",
+                                            tags=("overlay","seed"))
 
     # ---------- coordinate transforms ----------
     def _to_canvas(self, xpx: int, ypx: int) -> Tuple[int,int]:
@@ -450,6 +467,8 @@ class ChartDigitizerDialog(tk.Toplevel):
 
     # ---------- clicks ----------
     def _on_click(self, event):
+        if event.state & 0x0004:  # Control held: handled by ctrl bindings
+            return
         xpx, ypx = self._to_image_px(event.x, event.y)
         mode = self.tool_mode.get()
 
@@ -636,6 +655,9 @@ class ChartDigitizerDialog(tk.Toplevel):
         self._redraw_overlay()
 
     def _on_ctrl_toggle_press(self, event):
+        if self.tool_mode.get() == "addseries":
+            if self._add_extra_seed_from_click(event):
+                return
         if self.tool_mode.get() != "editseries" or self._active_series_id is None:
             return
         self._toggle_dragging = True
@@ -643,6 +665,8 @@ class ChartDigitizerDialog(tk.Toplevel):
         self._ctrl_toggle_at(event)
 
     def _on_ctrl_toggle_drag(self, event):
+        if self.tool_mode.get() == "addseries":
+            return
         if not self._toggle_dragging:
             return
         self._ctrl_toggle_at(event)
@@ -677,6 +701,30 @@ class ChartDigitizerDialog(tk.Toplevel):
                 bestd = d2
                 best = i
         return best
+
+    def _add_extra_seed_from_click(self, event) -> bool:
+        s = None
+        if self._active_series_id is not None:
+            s = self._get_series(self._active_series_id)
+        if s is None and self.series:
+            s = self.series[-1]
+        if not s or getattr(s, "chart_kind", s.mode) != "line":
+            return False
+
+        xpx, ypx = self._to_image_px(event.x, event.y)
+        if s.extra_seeds_px is None:
+            s.extra_seeds_px = []
+        s.extra_seeds_px.append((xpx, ypx))
+
+        try:
+            self._extract_series(s)
+        except Exception as e:
+            messagebox.showerror("Series extraction failed", str(e))
+            return True
+
+        self._update_tree_row(s)
+        self._redraw_overlay()
+        return True
 
     # ---------- Loupe ----------
     def _on_motion(self, event):
@@ -827,9 +875,16 @@ class ChartDigitizerDialog(tk.Toplevel):
 
             xpx_grid = [int(round(cal.x_data_to_px(x))) for x in x_grid]
 
+            roi_h = max(1, y1 - y0)
+            band_reacq_px = max(40, int(0.25 * roi_h))
+            max_jump_px = max(30, int(0.20 * roi_h))
+
             px_pts, ypx_raw = extract_line_series(
                 self._bgr, roi, s.color_bgr, tol, xpx_grid,
                 seed_px=s.seed_px,
+                extra_seeds_px=(s.extra_seeds_px or None),
+                band_reacq_px=band_reacq_px,
+                max_jump_px=max_jump_px,
             )
 
             y_data_raw: List[Optional[float]] = []
