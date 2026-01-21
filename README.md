@@ -20,12 +20,14 @@ Chart snips allow you to pick out individual series for various chart type after
 
 ## Install
 
+Install python then in the terminal:
+
 ```bash
 pip install mss pillow pytesseract
 pip install opencv-python
 ```
 
-Tesseract must be installed separately. On Windows, recommended builds:
+Tesseract must be installed separately (pytessseract is just a binding). On Windows, recommended builds:
 - https://github.com/UB-Mannheim/tesseract/wiki
 
 ## Run
@@ -46,9 +48,9 @@ python snipper.py
 
 ## Chart snipping workflow
 
-1. Click **Chart snip** and drag-select the chart region.
+1. Open an chart image in your view of choice, then in snipper, click **Chart snip** and drag-select the chart region in your viewer.
 2. Setup the chart for scanning:
-   - Toolbar: **Set region**: The part of the chart that contains series data. Defaults to full snip image.
+   - Toolbar: **Set region**: The part of the chart that contains series data. Defaults to the full image snip.
    - Toolbar: **Set X axis**: click twice for any pair of x-axis tick marks; enter x0/x1 values. These do not restrict what is scanned only how values are converted from pixels to chart units.
    - Toolbar: **Set Y axis**: click twice for any pair of y-axis pixels; enter y0/y1 values. These do not restrict what is scanned only how values are converted from pixels to chart units.
    - Calibration: You can specify X and Y axis scales and optional date unit specifier for the X-axis (UNIX format: %Y=year, %m-%Y=month-year, %m/%d/%Y=month/day/year etc.)
