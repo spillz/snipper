@@ -13,6 +13,18 @@ import tkinter as tk
 from tkinter import ttk, filedialog, messagebox
 from tkinter import simpledialog
 
+import ctypes
+import platform
+
+if platform.system().lower() == "windows":
+    try:  # Per-monitor v2 awareness when available.
+        ctypes.windll.shcore.SetProcessDpiAwareness(2)
+    except (AttributeError, OSError):
+        try:
+            ctypes.windll.user32.SetProcessDPIAware()
+        except (AttributeError, OSError):
+            pass
+
 import mss
 import pytesseract
 from pytesseract import Output
@@ -48,7 +60,6 @@ def park_offscreen_workarea(win, pad=50):
 # -----------------------------
 
 import os
-import platform
 import shutil
 from pathlib import Path
 import pytesseract
@@ -436,6 +447,8 @@ class SnipOverlay(tk.Toplevel):
             self.canvas.create_rectangle(0, 0, 0, 0, fill="black", stipple="gray50", outline="")
             for _ in range(4)
         ]
+        # Show full-screen crosshatch immediately before the first click.
+        self._update_dim(0, 0, 0, 0)
 
         self.start_x = None
         self.start_y = None
