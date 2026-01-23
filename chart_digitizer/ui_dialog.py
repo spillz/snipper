@@ -3,9 +3,11 @@ from __future__ import annotations
 
 import tkinter as tk
 from tkinter import ttk, filedialog, messagebox, simpledialog
+import tkinter.font as tkfont
 from typing import Callable, Optional, Tuple, List
 
 import bisect
+import platform
 import numpy as np
 from PIL import Image, ImageTk
 
@@ -25,7 +27,9 @@ class ChartDigitizerDialog(tk.Toplevel):
         super().__init__(parent)
         self.title("Chart → CSV (V4)")
         self.geometry("1180x760")
-        self.transient(parent)  # modeless: no grab_set
+        self.resizable(True, True)
+        if platform.system().lower() != "windows":
+            self.transient(parent)  # modeless: no grab_set
         self._on_append_text = on_append_text
 
         self._pil = image.convert("RGB")
@@ -78,11 +82,13 @@ class ChartDigitizerDialog(tk.Toplevel):
         root = ttk.Frame(self, padding=8)
         root.pack(fill="both", expand=True)
 
-        left = ttk.Frame(root)
-        left.pack(side="left", fill="both", expand=True)
+        self._panes = ttk.Panedwindow(root, orient="horizontal")
+        self._panes.pack(fill="both", expand=True)
 
-        right = ttk.Frame(root, width=340)
-        right.pack(side="right", fill="y")
+        left = ttk.Frame(self._panes)
+        right = ttk.Frame(self._panes, width=340)
+        self._panes.add(left, weight=2)
+        self._panes.add(right, weight=1)
 
         # Toolbar
         bar = ttk.Frame(left)
@@ -198,6 +204,7 @@ class ChartDigitizerDialog(tk.Toplevel):
         self.tree.column("enabled", width=34, anchor="center")
         self.tree.column("name", width=200, anchor="w")
         self.tree.column("n", width=60, anchor="e")
+        self._configure_tree_rowheight()
         self.tree.pack(fill="both", expand=True)
 
         self.tree.bind("<<TreeviewSelect>>", self._on_tree_select)
@@ -215,6 +222,30 @@ class ChartDigitizerDialog(tk.Toplevel):
         ttk.Button(exp, text="Append CSV", command=self._append_csv).pack(side="left")
         ttk.Button(exp, text="Export CSV…", command=self._export_csv).pack(side="left", padx=(8,0))
         ttk.Button(exp, text="Close", command=self.destroy).pack(side="right")
+
+        self.after(0, self._set_default_pane_ratio)
+
+    def _configure_tree_rowheight(self):
+        style = ttk.Style(self)
+        font_name = style.lookup("Treeview", "font") or "TkDefaultFont"
+        try:
+            font = tkfont.nametofont(font_name)
+        except Exception:
+            font = tkfont.nametofont("TkDefaultFont")
+        rowheight = max(18, int(font.metrics("linespace")) + 6)
+        style.configure("Series.Treeview", rowheight=rowheight)
+        self.tree.configure(style="Series.Treeview")
+
+    def _set_default_pane_ratio(self):
+        if not getattr(self, "_panes", None):
+            return
+        self._panes.update_idletasks()
+        total = self._panes.winfo_width()
+        if total <= 1:
+            return
+        # Left ~67%, right ~33% by default.
+        self._panes.sashpos(0, int(total * 0.67))
+
 
     def _update_tip(self):
         mode = self.tool_mode.get()
