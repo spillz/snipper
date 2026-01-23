@@ -43,7 +43,7 @@ def write_long_csv(
 
 def write_wide_csv(
     path: str,
-    x_grid: List[float],
+    x_grid: List[float | str],
     series: List[Series],
     delimiter: str = ",",
     *,
@@ -69,7 +69,7 @@ def write_wide_csv(
             w.writerow(row)
 
 def wide_csv_string(
-    x_grid: List[float],
+    x_grid: List[float | str],
     series: List[Series],
     delimiter: str = ",",
     *,

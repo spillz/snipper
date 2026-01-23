@@ -73,6 +73,7 @@ class ChartCalibration:
     x: AxisCalibration
     y: AxisCalibration
     x_date_format: str = "%Y"
+    y_date_format: str = "%Y"
 
     def x_px_to_data(self, xpx: float) -> float:
         return self.x.px_to_value(xpx)
@@ -95,4 +96,14 @@ class ChartCalibration:
         if self.x.scale == AxisScale.DATE:
             return _format_date(v, self.x_date_format)
         # Avoid scientific unless needed
+        return str(v)
+
+    def parse_y_value(self, s: str) -> float:
+        if self.y.scale == AxisScale.DATE:
+            return _parse_date(s, self.y_date_format)
+        return float(s)
+
+    def format_y_value(self, v: float) -> str:
+        if self.y.scale == AxisScale.DATE:
+            return _format_date(v, self.y_date_format)
         return str(v)

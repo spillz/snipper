@@ -27,7 +27,7 @@ from .export_csv import wide_csv_string, long_csv_string, write_wide_csv, write_
 class ChartDigitizerDialog(tk.Toplevel):
     def __init__(self, parent: tk.Tk, *, image: Image.Image, on_append_text: Callable[[str], None]):
         super().__init__(parent)
-        self.title("Chart → CSV (V4)")
+        self.title("Chart → CSV")
         self.geometry("1180x760")
         self.resizable(True, True)
         if platform.system().lower() != "windows":
@@ -46,7 +46,7 @@ class ChartDigitizerDialog(tk.Toplevel):
         self.tool_mode = tk.StringVar(value="roi")  # edit|roi|xaxis|yaxis|addseries
         self.chart_mode = tk.StringVar(value="line")  # line|scatter|column|bar|area
         self.var_stacked = tk.BooleanVar(value=False)
-        self.var_stride = tk.StringVar(value="continuous")  # continuous|categorical
+        self.var_stride = tk.StringVar(value="Fixed step")  # continuous|categorical
         self.var_prefer_outline = tk.BooleanVar(value=True)
 
 
@@ -60,6 +60,7 @@ class ChartDigitizerDialog(tk.Toplevel):
         self.var_x1_val = tk.StringVar(value="100")
         self.var_y0_val = tk.StringVar(value="0")
         self.var_y1_val = tk.StringVar(value="100")
+        self.var_categories = tk.StringVar(value="x1;x2;x3")
 
         self.var_x_step = tk.DoubleVar(value=1.0)
         self.var_x_step_unit = tk.StringVar(value="days")
@@ -80,6 +81,7 @@ class ChartDigitizerDialog(tk.Toplevel):
         self._pending_axis: Optional[str] = None  # 'x0','x1','y0','y1' progress
 
         self._build_ui()
+        self._on_chart_mode_change()
         self._render_image()
         self._update_tip()
 
@@ -122,13 +124,13 @@ class ChartDigitizerDialog(tk.Toplevel):
         ttk.Label(bar, text="Stride:").pack(side="left", padx=(10,0))
         stride_combo = ttk.Combobox(
             bar, textvariable=self.var_stride, state="readonly", width=11,
-            values=("continuous", "categorical")
+            values=("Fixed step", "Categories")
         )
         stride_combo.pack(side="left", padx=(6,0))
         stride_combo.bind("<<ComboboxSelected>>", lambda e: self._on_chart_mode_change())
 
         ttk.Checkbutton(
-            bar, text="Prefer outline", variable=self.var_prefer_outline,
+            bar, text="Span mode (bars/areas)", variable=self.var_prefer_outline,
             command=self._on_chart_mode_change
         ).pack(side="left", padx=(10,0))
 
@@ -197,20 +199,33 @@ class ChartDigitizerDialog(tk.Toplevel):
         self.cmb_date_fmt.grid(row=0, column=3, sticky="w")
 
         ttk.Label(grid, text="Y scale").grid(row=1, column=0, sticky="w", pady=(6,0))
-        ttk.Combobox(grid, textvariable=self.y_scale, state="readonly", width=10,
-                     values=[AxisScale.LINEAR.value, AxisScale.LOG10.value]).grid(row=1, column=1, sticky="w", padx=(6,0), pady=(6,0))
+        self.cmb_y_scale = ttk.Combobox(
+            grid, textvariable=self.y_scale, state="readonly", width=10,
+            values=[AxisScale.LINEAR.value, AxisScale.LOG10.value, AxisScale.DATE.value]
+        )
+        self.cmb_y_scale.grid(row=1, column=1, sticky="w", padx=(6,0), pady=(6,0))
+        self.cmb_y_scale.bind("<<ComboboxSelected>>", lambda _e: self._on_y_scale_change())
 
         self.var_x0_label = tk.StringVar(value="x0")
         self.var_x1_label = tk.StringVar(value="x1")
-        ttk.Label(grid, textvariable=self.var_x0_label).grid(row=2, column=0, sticky="w", pady=(8,0))
-        ttk.Entry(grid, textvariable=self.var_x0_val, width=12).grid(row=2, column=1, sticky="w", pady=(8,0))
-        ttk.Label(grid, textvariable=self.var_x1_label).grid(row=2, column=2, sticky="w", padx=(8,0), pady=(8,0))
-        ttk.Entry(grid, textvariable=self.var_x1_val, width=12).grid(row=2, column=3, sticky="w", pady=(8,0))
+        self.lbl_categories = ttk.Label(grid, text="Categories (;)")
+        self.ent_categories = ttk.Entry(grid, textvariable=self.var_categories, width=28)
+        self.lbl_categories.grid(row=2, column=0, sticky="w", pady=(8, 0))
+        self.ent_categories.grid(row=2, column=1, columnspan=3, sticky="w", pady=(8, 0))
 
-        ttk.Label(grid, text="y0").grid(row=3, column=0, sticky="w", pady=(6,0))
-        ttk.Entry(grid, textvariable=self.var_y0_val, width=12).grid(row=3, column=1, sticky="w", pady=(6,0))
-        ttk.Label(grid, text="y1").grid(row=3, column=2, sticky="w", padx=(8,0), pady=(6,0))
-        ttk.Entry(grid, textvariable=self.var_y1_val, width=12).grid(row=3, column=3, sticky="w", pady=(6,0))
+        self.lbl_x0 = ttk.Label(grid, textvariable=self.var_x0_label)
+        self.ent_x0 = ttk.Entry(grid, textvariable=self.var_x0_val, width=12)
+        self.lbl_x1 = ttk.Label(grid, textvariable=self.var_x1_label)
+        self.ent_x1 = ttk.Entry(grid, textvariable=self.var_x1_val, width=12)
+        self.lbl_x0.grid(row=3, column=0, sticky="w", pady=(8,0))
+        self.ent_x0.grid(row=3, column=1, sticky="w", pady=(8,0))
+        self.lbl_x1.grid(row=3, column=2, sticky="w", padx=(8,0), pady=(8,0))
+        self.ent_x1.grid(row=3, column=3, sticky="w", pady=(8,0))
+
+        ttk.Label(grid, text="y0").grid(row=4, column=0, sticky="w", pady=(6,0))
+        ttk.Entry(grid, textvariable=self.var_y0_val, width=12).grid(row=4, column=1, sticky="w", pady=(6,0))
+        ttk.Label(grid, text="y1").grid(row=4, column=2, sticky="w", padx=(8,0), pady=(6,0))
+        ttk.Entry(grid, textvariable=self.var_y1_val, width=12).grid(row=4, column=3, sticky="w", pady=(6,0))
 
         ttk.Label(ax, text="Axis pixels: click in 'Set X axis'/'Set Y axis' to set x0/x1/y0/y1 pixels (defaults to ROI bounds).").pack(fill="x", pady=(8,0))
 
@@ -295,15 +310,35 @@ class ChartDigitizerDialog(tk.Toplevel):
     def _is_x_date_scale(self) -> bool:
         return self.x_scale.get() == AxisScale.DATE.value
 
+    def _is_y_date_scale(self) -> bool:
+        return self.y_scale.get() == AxisScale.DATE.value
+
+    def _date_fmt_axis(self) -> str:
+        return "y" if self.chart_mode.get() == "bar" else "x"
+
+    def _stride_mode(self) -> str:
+        raw = (self.var_stride.get() or "").strip().lower()
+        if raw.startswith("categorical") or raw == "categories":
+            return "categorical"
+        if raw.startswith("fixed"):
+            return "continuous"
+        if raw in ("continuous", "categorical"):
+            return raw
+        return "continuous"
+
     def _on_x_scale_change(self) -> None:
         self._refresh_scale_ui()
-        if self._is_x_date_scale():
+        if self._is_x_date_scale() and self._date_fmt_axis() == "x":
             self._ensure_date_values()
             self._set_default_date_unit()
         self._update_tip()
 
+    def _on_y_scale_change(self) -> None:
+        self._refresh_scale_ui()
+        self._update_tip()
+
     def _on_date_fmt_change(self) -> None:
-        if self._is_x_date_scale():
+        if self._date_fmt_axis() == "x" and self._is_x_date_scale():
             self._ensure_date_values()
             self._set_default_date_unit()
 
@@ -311,14 +346,20 @@ class ChartDigitizerDialog(tk.Toplevel):
         self._date_unit_user_set = True
 
     def _refresh_scale_ui(self) -> None:
-        is_date = self._is_x_date_scale()
+        date_axis = self._date_fmt_axis()
+        is_date = self._is_x_date_scale() if date_axis == "x" else self._is_y_date_scale()
+        is_categorical = self._stride_mode() == "categorical"
 
-        if is_date:
+        if is_date and not is_categorical:
             self.lbl_date_fmt.grid()
             self.cmb_date_fmt.grid()
-            self.var_x0_label.set("x0 (date)")
-            self.var_x1_label.set("x1 (date)")
-            self.var_x_step_label.set("X step (date):")
+            if date_axis == "x":
+                self.lbl_date_fmt.configure(text="Date fmt (X)")
+                self.var_x0_label.set("x0 (date)")
+                self.var_x1_label.set("x1 (date)")
+                self.var_x_step_label.set("X step (date):")
+            else:
+                self.lbl_date_fmt.configure(text="Date fmt (Y)")
         else:
             self.lbl_date_fmt.grid_remove()
             self.cmb_date_fmt.grid_remove()
@@ -326,9 +367,27 @@ class ChartDigitizerDialog(tk.Toplevel):
             self.var_x1_label.set("x1")
             self.var_x_step_label.set("X step (line):")
 
+        if is_categorical:
+            self.lbl_categories.grid()
+            self.ent_categories.grid()
+            self._cat_row_visible = True
+            self.lbl_x0.grid_remove()
+            self.ent_x0.grid_remove()
+            self.lbl_x1.grid_remove()
+            self.ent_x1.grid_remove()
+            self._ensure_categories_default()
+        else:
+            self.lbl_categories.grid_remove()
+            self.ent_categories.grid_remove()
+            self._cat_row_visible = False
+            self.lbl_x0.grid()
+            self.ent_x0.grid()
+            self.lbl_x1.grid()
+            self.ent_x1.grid()
+
         show_x_step = not (
-            self.chart_mode.get() == "scatter"
-            or self.var_stride.get() == "categorical"
+            self.chart_mode.get() in ("scatter", "bar")
+            or self._stride_mode() == "categorical"
         )
         if show_x_step:
             if not getattr(self, "_x_step_row_visible", True):
@@ -339,7 +398,7 @@ class ChartDigitizerDialog(tk.Toplevel):
                 self._x_step_row.pack_forget()
                 self._x_step_row_visible = False
 
-        show_units = is_date and show_x_step
+        show_units = (is_date and show_x_step and (not is_categorical) and date_axis == "x")
         if show_units:
             if not getattr(self, "_x_step_units_visible", True):
                 self.lbl_x_step_units.pack(side="left", padx=(8, 0))
@@ -350,6 +409,11 @@ class ChartDigitizerDialog(tk.Toplevel):
                 self.lbl_x_step_units.pack_forget()
                 self.cmb_x_step_units.pack_forget()
                 self._x_step_units_visible = False
+
+        if is_categorical:
+            self.cmb_x_scale.configure(state="disabled")
+        else:
+            self.cmb_x_scale.configure(state="readonly")
 
     def _default_date_unit_for_fmt(self, fmt: str) -> str:
         fmt = fmt or ""
@@ -376,6 +440,41 @@ class ChartDigitizerDialog(tk.Toplevel):
         if (not self._date_unit_user_set) or (self.var_x_step_unit.get() == (self._date_unit_auto or "")):
             self.var_x_step_unit.set(default)
             self._date_unit_auto = default
+
+    def _ensure_categories_default(self) -> None:
+        if not self.var_categories.get().strip():
+            self.var_categories.set("x1;x2;x3")
+
+    def _parse_categories(self) -> List[str]:
+        raw = self.var_categories.get()
+        parts = [p.strip() for p in (raw or "").split(";")]
+        return [p for p in parts if p]
+
+    def _category_centers_px(self, count: int, *, axis: str) -> List[float]:
+        if count <= 1:
+            if axis == "y":
+                p0, p1 = self._y_axis_px()
+            else:
+                p0, p1 = self._x_axis_px()
+            return [float(p0)]
+
+        if axis == "y":
+            p0, p1 = self._y_axis_px()
+        else:
+            p0, p1 = self._x_axis_px()
+        step = (float(p1) - float(p0)) / float(count - 1)
+        return [float(p0) + (i * step) for i in range(count)]
+
+    def _category_offset_px(self, count: int, *, axis: str, seed_px: Tuple[int, int]) -> float:
+        centers = self._category_centers_px(count, axis=axis)
+        if not centers:
+            return 0.0
+        if axis == "y":
+            pos = float(seed_px[1])
+        else:
+            pos = float(seed_px[0])
+        idx = int(np.argmin([abs(pos - c) for c in centers]))
+        return float(pos - centers[idx])
 
     def _ensure_date_values(self) -> None:
         fmt = self.date_fmt.get().strip() or "%Y"
@@ -543,6 +642,10 @@ class ChartDigitizerDialog(tk.Toplevel):
         self.tip_var.set(msg)
 
     def _on_chart_mode_change(self):
+        if self.chart_mode.get() in ("column", "bar", "area"):
+            self.var_prefer_outline.set(True)
+        else:
+            self.var_prefer_outline.set(False)
         self._update_tip()
         self._refresh_scale_ui()
 
@@ -1018,7 +1121,7 @@ class ChartDigitizerDialog(tk.Toplevel):
             color_bgr=target,
             chart_kind=mode,
             stacked=bool(self.var_stacked.get()),
-            stride_mode=str(self.var_stride.get()),
+            stride_mode=str(self._stride_mode()),
             prefer_outline=bool(self.var_prefer_outline.get()),
         )
         s.seed_px = (xpx, ypx)
@@ -1118,14 +1221,22 @@ class ChartDigitizerDialog(tk.Toplevel):
                 xmin, xmax = xmax, xmin
 
             step = float(self.var_x_step.get())
-            if self._is_x_date_scale():
-                x_grid = self._build_date_grid_aligned(
-                    xmin, xmax, step, self.var_x_step_unit.get(), anchor=x0_val
-                )
-            else:
-                x_grid = build_x_grid_aligned(xmin, xmax, step, anchor=x0_val)
-
-            xpx_grid = [int(round(cal.x_data_to_px(x))) for x in x_grid]
+            x_grid: List[float] = []
+            xpx_grid: List[int] = []
+            if stride == "categorical":
+                labels = self._parse_categories()
+                if labels:
+                    centers = self._category_centers_px(len(labels), axis="x")
+                    xpx_grid = [int(round(p)) for p in centers]
+                    x_grid = [float(i + 1) for i in range(len(labels))]
+            if not x_grid:
+                if self._is_x_date_scale():
+                    x_grid = self._build_date_grid_aligned(
+                        xmin, xmax, step, self.var_x_step_unit.get(), anchor=x0_val
+                    )
+                else:
+                    x_grid = build_x_grid_aligned(xmin, xmax, step, anchor=x0_val)
+                xpx_grid = [int(round(cal.x_data_to_px(x))) for x in x_grid]
 
             roi_h = max(1, y1 - y0)
             band_reacq_px = max(40, int(0.25 * roi_h))
@@ -1167,9 +1278,18 @@ class ChartDigitizerDialog(tk.Toplevel):
         if kind in ("column", "area"):
             # Determine sampling xpx_grid
             if stride == "categorical":
-                centers = detect_runs_centers_along_x(mask, min_run_px=2)
-                xpx_grid = [int(x0 + c) for c in centers]
-                x_grid = [float(cal.x_px_to_data(xpx)) for xpx in xpx_grid]
+                labels = self._parse_categories()
+                if labels:
+                    centers = self._category_centers_px(len(labels), axis="x")
+                    offset = 0.0
+                    if kind == "column" and s.seed_px is not None:
+                        offset = self._category_offset_px(len(labels), axis="x", seed_px=s.seed_px)
+                    xpx_grid = [int(round(p + offset)) for p in centers]
+                    x_grid = [float(i + 1) for i in range(len(labels))]
+                else:
+                    centers = detect_runs_centers_along_x(mask, min_run_px=2)
+                    xpx_grid = [int(x0 + c) for c in centers]
+                    x_grid = [float(cal.x_px_to_data(xpx)) for xpx in xpx_grid]
             else:
                 x0_val = self._require_value(self.var_x0_val.get(), "x0")
                 roi_xmin_px, _, roi_xmax_px, _ = roi
@@ -1261,13 +1381,22 @@ class ChartDigitizerDialog(tk.Toplevel):
         # ---------------- Bar (horizontal) ----------------
         if kind == "bar":
             # For bars, categorical is the dominant case (categories along Y).
-            centers = detect_runs_centers_along_y(mask, min_run_px=2)
-            # Sort centers in display order (top->bottom). Categories typically go from top to bottom.
-            centers = sorted(centers)
+            labels = self._parse_categories()
+            if labels:
+                centers = self._category_centers_px(len(labels), axis="y")
+                offset = 0.0
+                if s.seed_px is not None:
+                    offset = self._category_offset_px(len(labels), axis="y", seed_px=s.seed_px)
+                ypx_grid = [int(round(p + offset)) for p in centers]
+                cat_grid = [float(i + 1) for i in range(len(labels))]
+            else:
+                centers = detect_runs_centers_along_y(mask, min_run_px=2)
+                # Sort centers in display order (top->bottom). Categories typically go from top to bottom.
+                centers = sorted(centers)
 
-            ypx_grid = [int(y0 + c) for c in centers]
-            # category coordinate (x axis in exported table): use y-axis data coordinate of the category center
-            cat_grid = [float(cal.y_px_to_data(ypx)) for ypx in ypx_grid]
+                ypx_grid = [int(y0 + c) for c in centers]
+                # category coordinate (x axis in exported table): use y-axis data coordinate of the category center
+                cat_grid = [float(cal.y_px_to_data(ypx)) for ypx in ypx_grid]
 
             baseline_x_px = None
             try:
@@ -1329,6 +1458,8 @@ class ChartDigitizerDialog(tk.Toplevel):
         cal = self._build_calibration()
         if label.startswith("x"):
             return float(cal.parse_x_value(s))
+        if label.startswith("y"):
+            return float(cal.parse_y_value(s))
         return float(s)
 
     def _build_calibration(self) -> ChartCalibration:
@@ -1363,12 +1494,16 @@ class ChartDigitizerDialog(tk.Toplevel):
 
         y0v_str = self.var_y0_val.get().strip()
         y1v_str = self.var_y1_val.get().strip()
-        y0v = float(y0v_str) if y0v_str else 0.0
-        y1v = float(y1v_str) if y1v_str else 1.0
+        if ys == AxisScale.DATE:
+            y0v = _parse_date_safe(y0v_str or "2000", date_fmt)
+            y1v = _parse_date_safe(y1v_str or "2001", date_fmt)
+        else:
+            y0v = float(y0v_str) if y0v_str else 0.0
+            y1v = float(y1v_str) if y1v_str else 1.0
 
         xcal = AxisCalibration(p0=float(x0_px), p1=float(x1_px), v0=float(x0v), v1=float(x1v), scale=xs)
         ycal = AxisCalibration(p0=float(y0_px), p1=float(y1_px), v0=float(y0v), v1=float(y1v), scale=ys)
-        return ChartCalibration(x=xcal, y=ycal, x_date_format=date_fmt)
+        return ChartCalibration(x=xcal, y=ycal, x_date_format=date_fmt, y_date_format=date_fmt)
 
     # ---------- Tree interactions ----------
     def _insert_tree_row(self, s: Series):
@@ -1468,7 +1603,103 @@ class ChartDigitizerDialog(tk.Toplevel):
             return x_grid, non_scatter
 
         # --- categorical binning ---
-        # Collect all x's; for horizontal bar extraction we stored category coordinate in x as well.
+        labels = self._parse_categories()
+        if labels:
+            count = len(labels)
+        else:
+            count = 0
+
+        # If categories are provided, snap to fixed centers based on x0/x1 pixel anchors.
+        if count > 0:
+            x_grid = labels
+
+            def _axis_for_series(s: Series) -> str:
+                return "y" if getattr(s, "chart_kind", s.mode) == "bar" else "x"
+
+            def _nearest_center_idx(px: float, centers_px: List[float]) -> Tuple[int, float]:
+                j = int(np.argmin([abs(px - c) for c in centers_px]))
+                return j, abs(px - centers_px[j])
+
+            aligned_series: List[Series] = []
+            for s in non_scatter:
+                axis = _axis_for_series(s)
+                centers_px = self._category_centers_px(count, axis=axis)
+
+                y_by_bin: List[Optional[float]] = [None] * count
+                en_by_bin: List[bool] = [False] * count
+                dist_by_bin: List[Optional[float]] = [None] * count
+
+                pe = s.point_enabled if s.point_enabled else [True] * len(s.points)
+                for i, (_x, y) in enumerate(s.points):
+                    if not s.px_points or i >= len(s.px_points):
+                        continue
+                    px = s.px_points[i][1] if axis == "y" else s.px_points[i][0]
+                    b, dist = _nearest_center_idx(float(px), centers_px)
+                    if dist_by_bin[b] is None or dist < dist_by_bin[b]:
+                        y_by_bin[b] = float(y)
+                        en_by_bin[b] = bool(pe[i])
+                        dist_by_bin[b] = dist
+
+                ss = Series(
+                    id=s.id,
+                    name=s.name,
+                    color_bgr=s.color_bgr,
+                    chart_kind=getattr(s, "chart_kind", s.mode),
+                    stacked=bool(getattr(s, "stacked", False)),
+                    stride_mode="categorical",
+                    prefer_outline=bool(getattr(s, "prefer_outline", True)),
+                    enabled=s.enabled,
+                )
+                ss.points = [(float(i + 1), 0.0 if y_by_bin[i] is None else float(y_by_bin[i])) for i in range(count)]
+                ss.point_enabled = [bool(en_by_bin[i]) for i in range(count)]
+                aligned_series.append(ss)
+
+            # --- stacked deltas (optional) ---
+            if any(getattr(s, "stacked", False) for s in aligned_series):
+                ordered = []
+                by_id = {s.id: s for s in aligned_series}
+                for s0 in non_scatter:
+                    if s0.id in by_id:
+                        ordered.append(by_id[s0.id])
+
+                deltas: List[Series] = []
+                prev: Optional[Series] = None
+                for s in ordered:
+                    if not getattr(s, "stacked", False):
+                        deltas.append(s)
+                        continue
+
+                    ds = Series(
+                        id=s.id,
+                        name=s.name,
+                        color_bgr=s.color_bgr,
+                        chart_kind=s.chart_kind,
+                        stacked=s.stacked,
+                        stride_mode=s.stride_mode,
+                        prefer_outline=s.prefer_outline,
+                        enabled=s.enabled,
+                    )
+                    ds.points = []
+                    ds.point_enabled = []
+                    for i, (x, y) in enumerate(s.points):
+                        ok = bool(s.point_enabled[i]) if s.point_enabled else True
+                        if prev is None:
+                            ds.points.append((float(x), float(y)))
+                            ds.point_enabled.append(ok)
+                        else:
+                            ok_prev = bool(prev.point_enabled[i]) if prev.point_enabled else True
+                            ok2 = ok and ok_prev
+                            y_prev = float(prev.points[i][1])
+                            ds.points.append((float(x), float(y) - y_prev))
+                            ds.point_enabled.append(ok2)
+                    deltas.append(ds)
+                    prev = s
+
+                aligned_series = deltas
+
+            return x_grid, aligned_series
+
+        # --- categorical binning fallback (auto) ---
         xs: List[float] = []
         for s in non_scatter:
             xs.extend([float(x) for (x, _y) in (s.points or [])])
@@ -1477,7 +1708,6 @@ class ChartDigitizerDialog(tk.Toplevel):
         if not xs:
             return [], non_scatter
 
-        # Cluster adjacent x's into bins to absorb within-category offsets.
         if len(xs) == 1:
             centers = [xs[0]]
         else:
@@ -1496,7 +1726,6 @@ class ChartDigitizerDialog(tk.Toplevel):
                     cur = [v]
             centers.append(float(np.mean(cur)))
 
-        # Use ordinal categories 1..N for the exported x_grid (stable even if axis is purely labels).
         x_grid = [float(i + 1) for i in range(len(centers))]
 
         def nearest_bin(x: float) -> int:
@@ -1588,8 +1817,10 @@ class ChartDigitizerDialog(tk.Toplevel):
 
         cal = self._build_calibration()
         x_formatter = None
-        if cal.x.scale == AxisScale.DATE:
-            if not any(getattr(s, "stride_mode", "continuous") == "categorical" for s in enabled):
+        if not any(getattr(s, "stride_mode", "continuous") == "categorical" for s in enabled):
+            if self.chart_mode.get() == "bar" and cal.y.scale == AxisScale.DATE:
+                x_formatter = cal.format_y_value
+            elif cal.x.scale == AxisScale.DATE:
                 x_formatter = cal.format_x_value
 
         # If every enabled series is scatter, export long; otherwise export wide.
@@ -1624,8 +1855,10 @@ class ChartDigitizerDialog(tk.Toplevel):
 
         cal = self._build_calibration()
         x_formatter = None
-        if cal.x.scale == AxisScale.DATE:
-            if not any(getattr(s, "stride_mode", "continuous") == "categorical" for s in enabled):
+        if not any(getattr(s, "stride_mode", "continuous") == "categorical" for s in enabled):
+            if self.chart_mode.get() == "bar" and cal.y.scale == AxisScale.DATE:
+                x_formatter = cal.format_y_value
+            elif cal.x.scale == AxisScale.DATE:
                 x_formatter = cal.format_x_value
 
         if all(getattr(s, "chart_kind", s.mode) == "scatter" for s in enabled):
