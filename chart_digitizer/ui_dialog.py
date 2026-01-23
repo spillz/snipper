@@ -48,6 +48,7 @@ class ChartDigitizerDialog(tk.Toplevel):
         self.var_stacked = tk.BooleanVar(value=False)
         self.var_stride = tk.StringVar(value="Fixed step")  # continuous|categorical
         self.var_prefer_outline = tk.BooleanVar(value=True)
+        self.var_fit_image = tk.BooleanVar(value=True)
 
 
         # Axis scale types
@@ -140,6 +141,10 @@ class ChartDigitizerDialog(tk.Toplevel):
         ttk.Label(loupe_frm, text="Loupe:").pack(side="left")
         self.loupe = tk.Canvas(loupe_frm, width=120, height=120, highlightthickness=1, highlightbackground="#666")
         self.loupe.pack(side="left", padx=(6,0))
+        ttk.Checkbutton(
+            loupe_frm, text="Fit", variable=self.var_fit_image,
+            command=self._on_fit_toggle
+        ).pack(side="left", padx=(10,0))
         self.tip_var = tk.StringVar(value="")
         self.tip_label = ttk.Label(loupe_frm, textvariable=self.tip_var, wraplength=900, justify="left")
         self.tip_label.pack(side="left", padx=(10,0), fill="x", expand=True)
@@ -671,7 +676,7 @@ class ChartDigitizerDialog(tk.Toplevel):
     # ---------- Image rendering ----------
     def _render_image(self):
         self.canvas.delete("all")
-        # Fit image into canvas (no scaling initially; enable simple scaling)
+        # Fit image into canvas (optional upscale)
         self.canvas.update_idletasks()
         cw = max(10, self.canvas.winfo_width())
         ch = max(10, self.canvas.winfo_height())
@@ -679,7 +684,10 @@ class ChartDigitizerDialog(tk.Toplevel):
         # scale factor
         sx = cw / self._iw
         sy = ch / self._ih
-        self._scale = min(1.0, sx, sy)  # don't upscale beyond 1 for now
+        if self.var_fit_image.get():
+            self._scale = min(sx, sy)
+        else:
+            self._scale = min(1.0, sx, sy)
         disp_w = int(self._iw * self._scale)
         disp_h = int(self._ih * self._scale)
 
@@ -691,6 +699,9 @@ class ChartDigitizerDialog(tk.Toplevel):
         self.canvas.create_image(self._offx, self._offy, image=self._photo, anchor="nw", tags=("img",))
 
         self._redraw_overlay()
+
+    def _on_fit_toggle(self):
+        self._render_image()
 
     def _redraw_overlay(self):
         self.canvas.delete("overlay")

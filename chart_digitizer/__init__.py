@@ -1,1 +1,1 @@
-"Chart digitizer package (v4)."
+"Chart digitizer package."

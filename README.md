@@ -27,7 +27,7 @@ pip install mss pillow pytesseract
 pip install opencv-python
 ```
 
-Tesseract must be installed separately (pytessseract is just a binding). On Windows, recommended builds:
+Tesseract must be installed separately (pytessseract is just a binding). On Windows, Tesseract builds can be found here:
 - https://github.com/UB-Mannheim/tesseract/wiki
 
 ## Run
@@ -48,13 +48,16 @@ python snipper.py
 
 ## Chart snipping workflow
 
-1. Open an chart image in your view of choice, then in snipper, click **Chart snip** and drag-select the chart region in your viewer.
-2. Setup the chart for scanning:
+1. Open a chart image in your viewer of choice, then in snipper, click **Chart snip** and drag-select the chart region in your viewer.
+2. Setup the chart for data point detection:
    - Toolbar: **Set region**: The part of the chart that contains series data. Defaults to the full image snip.
    - Toolbar: **Set X axis**: click twice for any pair of x-axis tick marks; enter x0/x1 values. These do not restrict what is scanned only how values are converted from pixels to chart units.
    - Toolbar: **Set Y axis**: click twice for any pair of y-axis pixels; enter y0/y1 values. These do not restrict what is scanned only how values are converted from pixels to chart units.
-   - Calibration: You can specify X and Y axis scales and optional date unit specifier for the X-axis (UNIX format: %Y=year, %m-%Y=month-year, %m/%d/%Y=month/day/year etc.)
-   - Output: **Set the x step**: The interval between series observations. This is a floating point number (default 1) in the units of the date fmt and you may specify partial units (e.g., 0.25 years = quarters)
+   - Chart type: Line/Area/Column/Bar/Scatter supported (if you have combo data you can change this for each series)
+   - Stacked: Check for stacked Line/Area/Column values
+   - Stride: Select a categorical axis or fixed step (affects calibration)
+   - Span mode: checked measures the length of the column/bar/area rather than distance from the axis
+   - Calibration: Specify axis scales and the categories or the x0/x1 bounds and step size for the x-axis. Dates aer also supported
 3. Toolbar: change tool to **Add series**: 
    - click on the lines in the chart image to add one series at a time to the Series list. 
    - You can edit the parameters above between clicks.
