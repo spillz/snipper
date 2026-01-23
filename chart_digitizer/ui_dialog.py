@@ -7,9 +7,11 @@ import tkinter.font as tkfont
 from typing import Callable, Optional, Tuple, List
 
 import bisect
+import calendar
 import platform
 import numpy as np
 from PIL import Image, ImageTk
+from datetime import datetime, timezone
 
 from .cv_utils import require_cv2, pil_to_bgr, color_distance_mask
 from .model import ChartState, Series
@@ -60,7 +62,11 @@ class ChartDigitizerDialog(tk.Toplevel):
         self.var_y1_val = tk.StringVar(value="100")
 
         self.var_x_step = tk.DoubleVar(value=1.0)
+        self.var_x_step_unit = tk.StringVar(value="days")
         self.var_tol = tk.IntVar(value=20)
+
+        self._date_unit_user_set = False
+        self._date_unit_auto: Optional[str] = None
 
         # editing / selection
         self._active_series_id: Optional[int] = None
@@ -161,18 +167,44 @@ class ChartDigitizerDialog(tk.Toplevel):
         grid.pack(fill="x")
 
         ttk.Label(grid, text="X scale").grid(row=0, column=0, sticky="w")
-        ttk.Combobox(grid, textvariable=self.x_scale, state="readonly", width=10,
-                     values=[AxisScale.LINEAR.value, AxisScale.LOG10.value, AxisScale.DATE.value]).grid(row=0, column=1, sticky="w", padx=(6,0))
-        ttk.Label(grid, text="Date fmt").grid(row=0, column=2, sticky="w", padx=(8,0))
-        ttk.Entry(grid, textvariable=self.date_fmt, width=10).grid(row=0, column=3, sticky="w")
+        self.cmb_x_scale = ttk.Combobox(
+            grid, textvariable=self.x_scale, state="readonly", width=10,
+            values=[AxisScale.LINEAR.value, AxisScale.LOG10.value, AxisScale.DATE.value]
+        )
+        self.cmb_x_scale.grid(row=0, column=1, sticky="w", padx=(6, 0))
+        self.cmb_x_scale.bind("<<ComboboxSelected>>", lambda _e: self._on_x_scale_change())
+
+        self.lbl_date_fmt = ttk.Label(grid, text="Date fmt")
+        self.lbl_date_fmt.grid(row=0, column=2, sticky="w", padx=(8, 0))
+        self.date_fmt_options = [
+            "%Y",
+            "%Y-%m",
+            "%Y-%m-%d",
+            "%Y/%m",
+            "%Y/%m/%d",
+            "%m/%d/%Y",
+            "%d/%m/%Y",
+            "%b %Y",
+            "%d %b %Y",
+            "%Y-%m-%d %H",
+            "%Y-%m-%d %H:%M",
+            "%Y-%m-%d %H:%M:%S",
+        ]
+        self.cmb_date_fmt = ttk.Combobox(
+            grid, textvariable=self.date_fmt, state="normal", width=14,
+            values=self.date_fmt_options
+        )
+        self.cmb_date_fmt.grid(row=0, column=3, sticky="w")
 
         ttk.Label(grid, text="Y scale").grid(row=1, column=0, sticky="w", pady=(6,0))
         ttk.Combobox(grid, textvariable=self.y_scale, state="readonly", width=10,
                      values=[AxisScale.LINEAR.value, AxisScale.LOG10.value]).grid(row=1, column=1, sticky="w", padx=(6,0), pady=(6,0))
 
-        ttk.Label(grid, text="x0").grid(row=2, column=0, sticky="w", pady=(8,0))
+        self.var_x0_label = tk.StringVar(value="x0")
+        self.var_x1_label = tk.StringVar(value="x1")
+        ttk.Label(grid, textvariable=self.var_x0_label).grid(row=2, column=0, sticky="w", pady=(8,0))
         ttk.Entry(grid, textvariable=self.var_x0_val, width=12).grid(row=2, column=1, sticky="w", pady=(8,0))
-        ttk.Label(grid, text="x1").grid(row=2, column=2, sticky="w", padx=(8,0), pady=(8,0))
+        ttk.Label(grid, textvariable=self.var_x1_label).grid(row=2, column=2, sticky="w", padx=(8,0), pady=(8,0))
         ttk.Entry(grid, textvariable=self.var_x1_val, width=12).grid(row=2, column=3, sticky="w", pady=(8,0))
 
         ttk.Label(grid, text="y0").grid(row=3, column=0, sticky="w", pady=(6,0))
@@ -188,8 +220,20 @@ class ChartDigitizerDialog(tk.Toplevel):
 
         row = ttk.Frame(out)
         row.pack(fill="x")
-        ttk.Label(row, text="X step (line):").pack(side="left")
-        ttk.Entry(row, textvariable=self.var_x_step, width=10).pack(side="left", padx=(6,0))
+        self._x_step_row = row
+        self.var_x_step_label = tk.StringVar(value="X step (line):")
+        self.lbl_x_step = ttk.Label(row, textvariable=self.var_x_step_label)
+        self.lbl_x_step.pack(side="left")
+        self.ent_x_step = ttk.Entry(row, textvariable=self.var_x_step, width=10)
+        self.ent_x_step.pack(side="left", padx=(6, 0))
+        self.lbl_x_step_units = ttk.Label(row, text="Unit:")
+        self.lbl_x_step_units.pack(side="left", padx=(8, 0))
+        self.cmb_x_step_units = ttk.Combobox(
+            row, textvariable=self.var_x_step_unit, state="readonly", width=9,
+            values=("seconds", "minutes", "hours", "days", "weeks", "months", "quarters", "years")
+        )
+        self.cmb_x_step_units.pack(side="left", padx=(6, 0))
+        self.cmb_x_step_units.bind("<<ComboboxSelected>>", lambda _e: self._on_x_step_unit_changed())
         ttk.Label(row, text="Color tol:").pack(side="left", padx=(10,0))
         ttk.Entry(row, textvariable=self.var_tol, width=6).pack(side="left", padx=(6,0))
 
@@ -224,6 +268,8 @@ class ChartDigitizerDialog(tk.Toplevel):
         ttk.Button(exp, text="Close", command=self.destroy).pack(side="right")
 
         self.after(0, self._set_default_pane_ratio)
+        self.date_fmt.trace_add("write", lambda *_: self._on_date_fmt_change())
+        self._refresh_scale_ui()
 
     def _configure_tree_rowheight(self):
         style = ttk.Style(self)
@@ -245,6 +291,175 @@ class ChartDigitizerDialog(tk.Toplevel):
             return
         # Left ~67%, right ~33% by default.
         self._panes.sashpos(0, int(total * 0.67))
+
+    def _is_x_date_scale(self) -> bool:
+        return self.x_scale.get() == AxisScale.DATE.value
+
+    def _on_x_scale_change(self) -> None:
+        self._refresh_scale_ui()
+        if self._is_x_date_scale():
+            self._ensure_date_values()
+            self._set_default_date_unit()
+        self._update_tip()
+
+    def _on_date_fmt_change(self) -> None:
+        if self._is_x_date_scale():
+            self._ensure_date_values()
+            self._set_default_date_unit()
+
+    def _on_x_step_unit_changed(self) -> None:
+        self._date_unit_user_set = True
+
+    def _refresh_scale_ui(self) -> None:
+        is_date = self._is_x_date_scale()
+
+        if is_date:
+            self.lbl_date_fmt.grid()
+            self.cmb_date_fmt.grid()
+            self.var_x0_label.set("x0 (date)")
+            self.var_x1_label.set("x1 (date)")
+            self.var_x_step_label.set("X step (date):")
+        else:
+            self.lbl_date_fmt.grid_remove()
+            self.cmb_date_fmt.grid_remove()
+            self.var_x0_label.set("x0")
+            self.var_x1_label.set("x1")
+            self.var_x_step_label.set("X step (line):")
+
+        show_x_step = not (
+            self.chart_mode.get() == "scatter"
+            or self.var_stride.get() == "categorical"
+        )
+        if show_x_step:
+            if not getattr(self, "_x_step_row_visible", True):
+                self._x_step_row.pack(fill="x")
+                self._x_step_row_visible = True
+        else:
+            if getattr(self, "_x_step_row_visible", True):
+                self._x_step_row.pack_forget()
+                self._x_step_row_visible = False
+
+        show_units = is_date and show_x_step
+        if show_units:
+            if not getattr(self, "_x_step_units_visible", True):
+                self.lbl_x_step_units.pack(side="left", padx=(8, 0))
+                self.cmb_x_step_units.pack(side="left", padx=(6, 0))
+                self._x_step_units_visible = True
+        else:
+            if getattr(self, "_x_step_units_visible", True):
+                self.lbl_x_step_units.pack_forget()
+                self.cmb_x_step_units.pack_forget()
+                self._x_step_units_visible = False
+
+    def _default_date_unit_for_fmt(self, fmt: str) -> str:
+        fmt = fmt or ""
+        if "%S" in fmt:
+            return "seconds"
+        if "%M" in fmt:
+            return "minutes"
+        if "%H" in fmt:
+            return "hours"
+        if "%d" in fmt or "%j" in fmt:
+            return "days"
+        if "%U" in fmt or "%W" in fmt:
+            return "weeks"
+        if "%m" in fmt or "%b" in fmt or "%B" in fmt:
+            return "months"
+        if "Q" in fmt or "q" in fmt:
+            return "quarters"
+        if "%Y" in fmt or "%y" in fmt:
+            return "years"
+        return "days"
+
+    def _set_default_date_unit(self) -> None:
+        default = self._default_date_unit_for_fmt(self.date_fmt.get())
+        if (not self._date_unit_user_set) or (self.var_x_step_unit.get() == (self._date_unit_auto or "")):
+            self.var_x_step_unit.set(default)
+            self._date_unit_auto = default
+
+    def _ensure_date_values(self) -> None:
+        fmt = self.date_fmt.get().strip() or "%Y"
+
+        def _valid_date(s: str) -> bool:
+            try:
+                datetime.strptime(s.strip(), fmt)
+                return True
+            except Exception:
+                return False
+
+        base = datetime(2000, 1, 1)
+        x0 = self.var_x0_val.get().strip()
+        x1 = self.var_x1_val.get().strip()
+
+        if not x0 or not _valid_date(x0):
+            self.var_x0_val.set(base.strftime(fmt))
+        if not x1 or not _valid_date(x1):
+            x1_dt = self._add_months(base, 12)
+            self.var_x1_val.set(x1_dt.strftime(fmt))
+
+    @staticmethod
+    def _last_day_of_month(year: int, month: int) -> int:
+        return int(calendar.monthrange(int(year), int(month))[1])
+
+    @classmethod
+    def _add_months(cls, dt: datetime, months: int) -> datetime:
+        total = (dt.year * 12) + (dt.month - 1) + int(months)
+        year = total // 12
+        month = (total % 12) + 1
+        day = min(dt.day, cls._last_day_of_month(year, month))
+        return dt.replace(year=year, month=month, day=day)
+
+    def _build_date_grid_aligned(
+        self,
+        xmin_val: float,
+        xmax_val: float,
+        step: float,
+        unit: str,
+        *,
+        anchor: float,
+    ) -> List[float]:
+        if step <= 0:
+            raise ValueError("x_step must be > 0")
+        if xmax_val < xmin_val:
+            xmin_val, xmax_val = xmax_val, xmin_val
+
+        unit = (unit or "days").lower()
+        seconds_per = {
+            "seconds": 1.0,
+            "minutes": 60.0,
+            "hours": 3600.0,
+            "days": 86400.0,
+            "weeks": 86400.0 * 7,
+        }
+        if unit in seconds_per:
+            step_sec = float(step) * seconds_per[unit]
+            return build_x_grid_aligned(xmin_val, xmax_val, step_sec, anchor=float(anchor))
+
+        months_per = {"months": 1, "quarters": 3, "years": 12}
+        if unit not in months_per:
+            raise ValueError(f"Unsupported date unit: {unit}")
+
+        months_step = int(max(1, round(float(step) * months_per[unit])))
+        anchor_dt = datetime.fromtimestamp(float(anchor), tz=timezone.utc)
+        xmin_dt = datetime.fromtimestamp(float(xmin_val), tz=timezone.utc)
+        xmax_dt = datetime.fromtimestamp(float(xmax_val), tz=timezone.utc)
+
+        anchor_idx = (anchor_dt.year * 12) + (anchor_dt.month - 1)
+        xmin_idx = (xmin_dt.year * 12) + (xmin_dt.month - 1)
+        delta = xmin_idx - anchor_idx
+        k_start = int(delta // months_step)
+
+        cur = self._add_months(anchor_dt, k_start * months_step)
+        while cur < xmin_dt:
+            k_start += 1
+            cur = self._add_months(anchor_dt, k_start * months_step)
+
+        xs: List[float] = []
+        while cur <= xmax_dt:
+            xs.append(cur.timestamp())
+            cur = self._add_months(cur, months_step)
+
+        return xs
 
 
     def _update_tip(self):
@@ -329,6 +544,7 @@ class ChartDigitizerDialog(tk.Toplevel):
 
     def _on_chart_mode_change(self):
         self._update_tip()
+        self._refresh_scale_ui()
 
     def _on_canvas_configure(self, _evt=None):
         # Avoid thrashing when resizing: schedule a single re-render
@@ -902,7 +1118,12 @@ class ChartDigitizerDialog(tk.Toplevel):
                 xmin, xmax = xmax, xmin
 
             step = float(self.var_x_step.get())
-            x_grid = build_x_grid_aligned(xmin, xmax, step, anchor=x0_val)
+            if self._is_x_date_scale():
+                x_grid = self._build_date_grid_aligned(
+                    xmin, xmax, step, self.var_x_step_unit.get(), anchor=x0_val
+                )
+            else:
+                x_grid = build_x_grid_aligned(xmin, xmax, step, anchor=x0_val)
 
             xpx_grid = [int(round(cal.x_data_to_px(x))) for x in x_grid]
 
@@ -957,7 +1178,12 @@ class ChartDigitizerDialog(tk.Toplevel):
                 if xmin > xmax:
                     xmin, xmax = xmax, xmin
                 step = float(self.var_x_step.get())
-                x_grid = build_x_grid_aligned(xmin, xmax, step, anchor=x0_val)
+                if self._is_x_date_scale():
+                    x_grid = self._build_date_grid_aligned(
+                        xmin, xmax, step, self.var_x_step_unit.get(), anchor=x0_val
+                    )
+                else:
+                    x_grid = build_x_grid_aligned(xmin, xmax, step, anchor=x0_val)
                 xpx_grid = [int(round(cal.x_data_to_px(x))) for x in x_grid]
 
             # Baseline pixel for sign (prefer y=0 when in range; else use y0 axis pixel)
@@ -1360,15 +1586,21 @@ class ChartDigitizerDialog(tk.Toplevel):
         if not enabled:
             return
 
+        cal = self._build_calibration()
+        x_formatter = None
+        if cal.x.scale == AxisScale.DATE:
+            if not any(getattr(s, "stride_mode", "continuous") == "categorical" for s in enabled):
+                x_formatter = cal.format_x_value
+
         # If every enabled series is scatter, export long; otherwise export wide.
         if all(getattr(s, "chart_kind", s.mode) == "scatter" for s in enabled):
-            txt = long_csv_string(enabled)
+            txt = long_csv_string(enabled, x_formatter=x_formatter)
         else:
             x_grid, ser = self._prepare_wide_export(enabled)
             if not x_grid or not ser:
                 messagebox.showinfo("Append CSV", "Nothing to export (no valid points).")
                 return
-            txt = wide_csv_string(x_grid, ser)
+            txt = wide_csv_string(x_grid, ser, x_formatter=x_formatter)
 
         self._on_append_text(txt)
 
@@ -1390,14 +1622,20 @@ class ChartDigitizerDialog(tk.Toplevel):
         if not path:
             return
 
+        cal = self._build_calibration()
+        x_formatter = None
+        if cal.x.scale == AxisScale.DATE:
+            if not any(getattr(s, "stride_mode", "continuous") == "categorical" for s in enabled):
+                x_formatter = cal.format_x_value
+
         if all(getattr(s, "chart_kind", s.mode) == "scatter" for s in enabled):
-            write_long_csv(path, enabled)
+            write_long_csv(path, enabled, x_formatter=x_formatter)
         else:
             x_grid, ser = self._prepare_wide_export(enabled)
             if not x_grid or not ser:
                 messagebox.showinfo("Export CSV", "Nothing to export (no valid points).")
                 return
-            write_wide_csv(path, x_grid, ser)
+            write_wide_csv(path, x_grid, ser, x_formatter=x_formatter)
 
         messagebox.showinfo("Export CSV", f"Saved:\n{path}")
 
