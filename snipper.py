@@ -818,6 +818,12 @@ class SnipOCRApp(tk.Tk):
     def hide_main_window(self):
         # Save exact current size+position
         self._saved_geometry = self.wm_geometry()
+        self._saved_wm_state = self.state()
+
+        # If maximized, normalize before parking off-screen so geometry can move.
+        if self._saved_wm_state == "zoomed":
+            self.state("normal")
+            self.update_idletasks()
 
         # Park off-screen (no withdraw/iconify)
         park_offscreen_workarea(self)
@@ -833,6 +839,8 @@ class SnipOCRApp(tk.Tk):
         self.lift()
         self.focus_force()
         self.update_idletasks()
+        if getattr(self, "_saved_wm_state", None) == "zoomed":
+            self.state("zoomed")
 
     def begin_new_snip(self, mode='OCR'):
         # 1) close dialogs
