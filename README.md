@@ -51,9 +51,9 @@ python snipper.py
 1. Open a chart image in your viewer of choice, then in snipper, click **Chart snip** and drag-select the chart region in your viewer.
 2. Setup the chart for data point detection:
    - Toolbar: **Set region**: The part of the chart that contains series data. Defaults to the full image snip.
-   - Toolbar: **Set X axis**: click twice for any pair of x-axis tick marks; enter x0/x1 values. These do not restrict what is scanned only how values are converted from pixels to chart units.
-   - Toolbar: **Set Y axis**: click twice for any pair of y-axis pixels; enter y0/y1 values. These do not restrict what is scanned only how values are converted from pixels to chart units.
-   - Chart type: Line/Area/Column/Bar/Scatter supported (if you have combo data you can change this for each series)
+   - Toolbar: **Set X axis**: click twice for any pair of x-axis tick marks; enter x0/x1 values. These do not restrict what is scanned only how values are converted from pixels to x-axis units or categories.
+   - Toolbar: **Set Y axis**: click twice for any pair of y-axis pixels; enter y0/y1 values. These do not restrict what is scanned only how values are converted from pixels to y-axis units.
+   - Chart type: Line/Area/Column/Bar/Scatter supported (if you have combo charts you can change this for each series type in the chart)
    - Stacked: Check for stacked Line/Area/Column values
    - Stride: Select a categorical axis or fixed step (affects calibration)
    - Span mode: checked measures the length of the column/bar/area rather than distance from the axis
@@ -61,16 +61,16 @@ python snipper.py
 3. Toolbar: change tool to **Add series**: 
    - click on the lines in the chart image to add one series at a time to the Series list. 
    - You can edit the parameters above between clicks.
-3. Toolbar: change tool to **Edit series** to edit:
+4. Toolbar: change tool to **Edit series** to edit:
    - Click on the individual series in the Series list
    - Drag points vertically (line mode) to adjust values.
    - Right-click a point to toggle NA (disabled).
-4. Series list
+5. Series list
    - Click series to change the active series
    - Double click on series to change names
    - Delete to drop the series (easy to add again via the "add series" tool)
    - "Toggle on/off" to off excludes from notebook append or CSV export
-5. Export:
+6. Export:
    - **Append CSV** appends to the notepad in the main window.
    - **Export CSV…** saves a CSV file.
 
