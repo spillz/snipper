@@ -10,6 +10,7 @@ class AxisScale(str, Enum):
     LINEAR = "linear"
     LOG10 = "log10"
     DATE = "date"
+    CATEGORICAL = "categorical"
 
 def _parse_date(s: str, fmt: str) -> float:
     # returns unix seconds (UTC)
@@ -36,7 +37,7 @@ class AxisCalibration:
         return self.p0 != self.p1 and self.v0 != self.v1
 
     def px_to_value(self, p: float) -> float:
-        if self.scale == AxisScale.LINEAR:
+        if self.scale in (AxisScale.LINEAR, AxisScale.CATEGORICAL):
             t = (p - self.p0) / (self.p1 - self.p0)
             return self.v0 + t * (self.v1 - self.v0)
         if self.scale == AxisScale.LOG10:
@@ -54,7 +55,7 @@ class AxisCalibration:
         raise ValueError(f"Unsupported scale: {self.scale}")
 
     def value_to_px(self, v: float) -> float:
-        if self.scale == AxisScale.LINEAR or self.scale == AxisScale.DATE:
+        if self.scale in (AxisScale.LINEAR, AxisScale.DATE, AxisScale.CATEGORICAL):
             t = (v - self.v0) / (self.v1 - self.v0)
             return self.p0 + t * (self.p1 - self.p0)
         if self.scale == AxisScale.LOG10:

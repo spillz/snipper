@@ -14,7 +14,7 @@ from PIL import Image, ImageTk
 from datetime import datetime, timezone
 
 from .cv_utils import require_cv2, pil_to_bgr, color_distance_mask
-from .model import ChartState, Series
+from .model import ChartState, Series, SeriesCalibration
 from .calibration import AxisScale, AxisCalibration, ChartCalibration
 from .extract import (
     build_x_grid, build_x_grid_aligned,
@@ -41,12 +41,13 @@ class ChartDigitizerDialog(tk.Toplevel):
         self.state = ChartState(xmin_px=0, ymin_px=0, xmax_px=self._iw, ymax_px=self._ih)
         self.series: List[Series] = []
         self._next_series_id = 1
+        self._calibration_names: dict[tuple, str] = {}
+        self._next_calibration_id = 1
 
         # Tool mode
         self.tool_mode = tk.StringVar(value="roi")  # edit|roi|xaxis|yaxis|addseries
-        self.chart_mode = tk.StringVar(value="line")  # line|scatter|column|bar|area
+        self.series_mode = tk.StringVar(value="line")  # line|scatter|column|bar|area
         self.var_stacked = tk.BooleanVar(value=False)
-        self.var_stride = tk.StringVar(value="Fixed step")  # continuous|categorical
         self.var_prefer_outline = tk.BooleanVar(value=True)
         self.var_fit_image = tk.BooleanVar(value=True)
 
@@ -61,10 +62,12 @@ class ChartDigitizerDialog(tk.Toplevel):
         self.var_x1_val = tk.StringVar(value="100")
         self.var_y0_val = tk.StringVar(value="0")
         self.var_y1_val = tk.StringVar(value="100")
-        self.var_categories = tk.StringVar(value="x1;x2;x3")
+        self.var_categories = tk.StringVar(value="cat1;cat2;cat3")
 
         self.var_x_step = tk.DoubleVar(value=1.0)
         self.var_x_step_unit = tk.StringVar(value="days")
+        self.var_y_step = tk.DoubleVar(value=1.0)
+        self.var_y_step_unit = tk.StringVar(value="days")
         self.var_tol = tk.IntVar(value=20)
 
         self._date_unit_user_set = False
@@ -77,12 +80,13 @@ class ChartDigitizerDialog(tk.Toplevel):
         self._toggle_dragging: bool = False
         self._toggle_seen: set[int] = set()
         self._edit_radius = 8
+        self._suppress_series_mode_change = False
 
         # axis click staging
         self._pending_axis: Optional[str] = None  # 'x0','x1','y0','y1' progress
 
         self._build_ui()
-        self._on_chart_mode_change()
+        self._on_series_mode_change()
         self._render_image()
         self._update_tip()
 
@@ -108,31 +112,18 @@ class ChartDigitizerDialog(tk.Toplevel):
             ttk.Radiobutton(bar, text=lbl, value=val, variable=self.tool_mode, command=self._on_tool_change).pack(side="left", padx=(8,0))
 
         ttk.Separator(bar, orient="vertical").pack(side="left", fill="y", padx=10)
-        ttk.Label(bar, text="Chart type:").pack(side="left")
+        ttk.Label(bar, text="Series type:").pack(side="left")
 
-        chart_combo = ttk.Combobox(
-            bar, textvariable=self.chart_mode, state="readonly", width=10,
+        series_combo = ttk.Combobox(
+            bar, textvariable=self.series_mode, state="readonly", width=10,
             values=("line", "scatter", "column", "bar", "area")
         )
-        chart_combo.pack(side="left", padx=(6,0))
-        chart_combo.bind("<<ComboboxSelected>>", lambda e: self._on_chart_mode_change())
+        series_combo.pack(side="left", padx=(6,0))
+        series_combo.bind("<<ComboboxSelected>>", lambda e: self._on_series_mode_change())
 
         ttk.Checkbutton(
             bar, text="Stacked", variable=self.var_stacked,
-            command=self._on_chart_mode_change
-        ).pack(side="left", padx=(10,0))
-
-        ttk.Label(bar, text="Stride:").pack(side="left", padx=(10,0))
-        stride_combo = ttk.Combobox(
-            bar, textvariable=self.var_stride, state="readonly", width=11,
-            values=("Fixed step", "Categories")
-        )
-        stride_combo.pack(side="left", padx=(6,0))
-        stride_combo.bind("<<ComboboxSelected>>", lambda e: self._on_chart_mode_change())
-
-        ttk.Checkbutton(
-            bar, text="Span mode (bars/areas)", variable=self.var_prefer_outline,
-            command=self._on_chart_mode_change
+            command=self._on_series_mode_change
         ).pack(side="left", padx=(10,0))
 
         # Loupe and Tip
@@ -170,19 +161,27 @@ class ChartDigitizerDialog(tk.Toplevel):
         ax = ttk.LabelFrame(right, text="Calibration", padding=8)
         ax.pack(side="top", fill="x")
 
+        self.axis_px_values = tk.StringVar(value="")
+        ttk.Label(ax, textvariable=self.axis_px_values).pack(fill="x", pady=(2, 0))
+
         grid = ttk.Frame(ax)
         grid.pack(fill="x")
+        for col in range(6):
+            grid.columnconfigure(col, weight=1)
 
-        ttk.Label(grid, text="X scale").grid(row=0, column=0, sticky="w")
+        x_axis_hdr = ttk.Frame(grid)
+        x_axis_hdr.grid(row=0, column=0, sticky="ew", pady=(6, 0), columnspan=6)
+        ttk.Label(x_axis_hdr, text="X axis").pack(side="left")
+        ttk.Separator(x_axis_hdr, orient="horizontal").pack(side="left", fill="x", expand=True, padx=(8, 0))
+        ttk.Label(grid, text="scale").grid(row=1, column=0, sticky="w")
         self.cmb_x_scale = ttk.Combobox(
             grid, textvariable=self.x_scale, state="readonly", width=10,
-            values=[AxisScale.LINEAR.value, AxisScale.LOG10.value, AxisScale.DATE.value]
+            values=[AxisScale.LINEAR.value, AxisScale.LOG10.value, AxisScale.DATE.value, AxisScale.CATEGORICAL.value]
         )
-        self.cmb_x_scale.grid(row=0, column=1, sticky="w", padx=(6, 0))
+        self.cmb_x_scale.grid(row=1, column=1, sticky="w", padx=(6, 0))
         self.cmb_x_scale.bind("<<ComboboxSelected>>", lambda _e: self._on_x_scale_change())
 
-        self.lbl_date_fmt = ttk.Label(grid, text="Date fmt")
-        self.lbl_date_fmt.grid(row=0, column=2, sticky="w", padx=(8, 0))
+        self.lbl_date_fmt = ttk.Label(grid, text="date fmt")
         self.date_fmt_options = [
             "%Y",
             "%Y-%m",
@@ -201,72 +200,100 @@ class ChartDigitizerDialog(tk.Toplevel):
             grid, textvariable=self.date_fmt, state="normal", width=14,
             values=self.date_fmt_options
         )
-        self.cmb_date_fmt.grid(row=0, column=3, sticky="w")
-
-        ttk.Label(grid, text="Y scale").grid(row=1, column=0, sticky="w", pady=(6,0))
-        self.cmb_y_scale = ttk.Combobox(
-            grid, textvariable=self.y_scale, state="readonly", width=10,
-            values=[AxisScale.LINEAR.value, AxisScale.LOG10.value, AxisScale.DATE.value]
-        )
-        self.cmb_y_scale.grid(row=1, column=1, sticky="w", padx=(6,0), pady=(6,0))
-        self.cmb_y_scale.bind("<<ComboboxSelected>>", lambda _e: self._on_y_scale_change())
 
         self.var_x0_label = tk.StringVar(value="x0")
         self.var_x1_label = tk.StringVar(value="x1")
-        self.lbl_categories = ttk.Label(grid, text="Categories (;)")
-        self.ent_categories = ttk.Entry(grid, textvariable=self.var_categories, width=28)
-        self.lbl_categories.grid(row=2, column=0, sticky="w", pady=(8, 0))
-        self.ent_categories.grid(row=2, column=1, columnspan=3, sticky="w", pady=(8, 0))
-
         self.lbl_x0 = ttk.Label(grid, textvariable=self.var_x0_label)
-        self.ent_x0 = ttk.Entry(grid, textvariable=self.var_x0_val, width=12)
+        self.ent_x0 = ttk.Entry(grid, textvariable=self.var_x0_val, width=10)
         self.lbl_x1 = ttk.Label(grid, textvariable=self.var_x1_label)
-        self.ent_x1 = ttk.Entry(grid, textvariable=self.var_x1_val, width=12)
-        self.lbl_x0.grid(row=3, column=0, sticky="w", pady=(8,0))
-        self.ent_x0.grid(row=3, column=1, sticky="w", pady=(8,0))
-        self.lbl_x1.grid(row=3, column=2, sticky="w", padx=(8,0), pady=(8,0))
-        self.ent_x1.grid(row=3, column=3, sticky="w", pady=(8,0))
-
-        ttk.Label(grid, text="y0").grid(row=4, column=0, sticky="w", pady=(6,0))
-        ttk.Entry(grid, textvariable=self.var_y0_val, width=12).grid(row=4, column=1, sticky="w", pady=(6,0))
-        ttk.Label(grid, text="y1").grid(row=4, column=2, sticky="w", padx=(8,0), pady=(6,0))
-        ttk.Entry(grid, textvariable=self.var_y1_val, width=12).grid(row=4, column=3, sticky="w", pady=(6,0))
-
-        ttk.Label(ax, text="Axis pixels: click in 'Set X axis'/'Set Y axis' to set x0/x1/y0/y1 pixels (defaults to ROI bounds).").pack(fill="x", pady=(8,0))
-
-        # Output
-        out = ttk.LabelFrame(right, text="Output", padding=8)
-        out.pack(side="top", fill="x", pady=(8,0))
-
-        row = ttk.Frame(out)
-        row.pack(fill="x")
-        self._x_step_row = row
-        self.var_x_step_label = tk.StringVar(value="X step (line):")
-        self.lbl_x_step = ttk.Label(row, textvariable=self.var_x_step_label)
-        self.lbl_x_step.pack(side="left")
-        self.ent_x_step = ttk.Entry(row, textvariable=self.var_x_step, width=10)
-        self.ent_x_step.pack(side="left", padx=(6, 0))
-        self.lbl_x_step_units = ttk.Label(row, text="Unit:")
-        self.lbl_x_step_units.pack(side="left", padx=(8, 0))
+        self.ent_x1 = ttk.Entry(grid, textvariable=self.var_x1_val, width=10)
+        self.var_x_step_label = tk.StringVar(value="step")
+        self.lbl_x_step = ttk.Label(grid, textvariable=self.var_x_step_label)
+        self.ent_x_step = ttk.Entry(grid, textvariable=self.var_x_step, width=8)
+        self.lbl_x_step_units = ttk.Label(grid, text="unit")
         self.cmb_x_step_units = ttk.Combobox(
-            row, textvariable=self.var_x_step_unit, state="readonly", width=9,
+            grid, textvariable=self.var_x_step_unit, state="readonly", width=9,
             values=("seconds", "minutes", "hours", "days", "weeks", "months", "quarters", "years")
         )
-        self.cmb_x_step_units.pack(side="left", padx=(6, 0))
         self.cmb_x_step_units.bind("<<ComboboxSelected>>", lambda _e: self._on_x_step_unit_changed())
-        ttk.Label(row, text="Color tol:").pack(side="left", padx=(10,0))
+
+        self.lbl_x_step.grid(row=1, column=2, sticky="w", padx=(8, 0))
+        self.ent_x_step.grid(row=1, column=3, sticky="w")
+        self.lbl_x_step_units.grid(row=1, column=4, sticky="w", padx=(8, 0))
+        self.cmb_x_step_units.grid(row=1, column=5, sticky="w")
+        self.lbl_x0.grid(row=3, column=0, sticky="w", pady=(6, 0))
+        self.ent_x0.grid(row=3, column=1, sticky="w", pady=(6, 0))
+        self.lbl_x1.grid(row=3, column=2, sticky="w", padx=(8, 0), pady=(6, 0))
+        self.ent_x1.grid(row=3, column=3, sticky="w", pady=(6, 0))
+
+        y_axis_hdr = ttk.Frame(grid)
+        y_axis_hdr.grid(row=5, column=0, sticky="ew", pady=(10, 0), columnspan=6)
+        ttk.Label(y_axis_hdr, text="Y axis").pack(side="left")
+        ttk.Separator(y_axis_hdr, orient="horizontal").pack(side="left", fill="x", expand=True, padx=(8, 0))
+        ttk.Label(grid, text="scale").grid(row=6, column=0, sticky="w", pady=(6,0))
+        self.cmb_y_scale = ttk.Combobox(
+            grid, textvariable=self.y_scale, state="readonly", width=10,
+            values=[AxisScale.LINEAR.value, AxisScale.LOG10.value, AxisScale.DATE.value, AxisScale.CATEGORICAL.value]
+        )
+        self.cmb_y_scale.grid(row=6, column=1, sticky="w", padx=(6,0), pady=(6,0))
+        self.cmb_y_scale.bind("<<ComboboxSelected>>", lambda _e: self._on_y_scale_change())
+
+        self.lbl_y0 = ttk.Label(grid, text="y0")
+        self.ent_y0 = ttk.Entry(grid, textvariable=self.var_y0_val, width=10)
+        self.lbl_y1 = ttk.Label(grid, text="y1")
+        self.ent_y1 = ttk.Entry(grid, textvariable=self.var_y1_val, width=10)
+        self.var_y_step_label = tk.StringVar(value="step")
+        self.lbl_y_step = ttk.Label(grid, textvariable=self.var_y_step_label)
+        self.ent_y_step = ttk.Entry(grid, textvariable=self.var_y_step, width=8)
+        self.lbl_y_step_units = ttk.Label(grid, text="unit")
+        self.cmb_y_step_units = ttk.Combobox(
+            grid, textvariable=self.var_y_step_unit, state="readonly", width=9,
+            values=("seconds", "minutes", "hours", "days", "weeks", "months", "quarters", "years")
+        )
+        self.cmb_y_step_units.bind("<<ComboboxSelected>>", lambda _e: self._on_y_step_unit_changed())
+
+        self.lbl_y_step.grid(row=6, column=2, sticky="w", padx=(8, 0))
+        self.ent_y_step.grid(row=6, column=3, sticky="w")
+        self.lbl_y_step_units.grid(row=6, column=4, sticky="w", padx=(8, 0))
+        self.cmb_y_step_units.grid(row=6, column=5, sticky="w")
+        self.lbl_y0.grid(row=8, column=0, sticky="w", pady=(6,0))
+        self.ent_y0.grid(row=8, column=1, sticky="w", pady=(6,0))
+        self.lbl_y1.grid(row=8, column=2, sticky="w", padx=(8,0), pady=(6,0))
+        self.ent_y1.grid(row=8, column=3, sticky="w", pady=(6,0))
+
+        self.lbl_categories = ttk.Label(grid, text="categories")
+        self.ent_categories = ttk.Entry(grid, textvariable=self.var_categories, width=28)
+        self.lbl_categories_count = ttk.Label(grid, text="")
+
+        cal_btns = ttk.Frame(ax)
+        cal_btns.pack(fill="x", pady=(8,0))
+        ttk.Button(cal_btns, text="Apply to selected", command=self._apply_calibration_to_selected).pack(side="left")
+        ttk.Button(cal_btns, text="Apply to all", command=self._apply_calibration_to_all).pack(side="left", padx=(8,0))
+
+        # Extraction
+        ext = ttk.LabelFrame(right, text="Extraction", padding=8)
+        ext.pack(side="top", fill="x", pady=(8,0))
+        row = ttk.Frame(ext)
+        row.pack(fill="x")
+        ttk.Label(row, text="Color tol:").pack(side="left")
         ttk.Entry(row, textvariable=self.var_tol, width=6).pack(side="left", padx=(6,0))
+        ttk.Checkbutton(
+            ext, text="Span mode (bars/areas)", variable=self.var_prefer_outline,
+            command=self._on_series_mode_change
+        ).pack(side="top", anchor="w", pady=(6,0))
 
         # Series list
         lst = ttk.LabelFrame(right, text="Series", padding=8)
         lst.pack(side="top", fill="both", expand=True, pady=(8,0))
 
-        self.tree = ttk.Treeview(lst, columns=("enabled","name","n"), show="headings", selectmode="browse", height=12)
+        self.tree = ttk.Treeview(lst, columns=("enabled","name","cal","n"), show="headings", selectmode="browse", height=12)
         self.tree.heading("enabled", text="On")
         self.tree.heading("name", text="Name")
+        self.tree.heading("cal", text="Cal")
         self.tree.heading("n", text="Pts")
         self.tree.column("enabled", width=34, anchor="center")
-        self.tree.column("name", width=200, anchor="w")
+        self.tree.column("name", width=170, anchor="w")
+        self.tree.column("cal", width=60, anchor="center")
         self.tree.column("n", width=60, anchor="e")
         self._configure_tree_rowheight()
         self.tree.pack(fill="both", expand=True)
@@ -289,6 +316,7 @@ class ChartDigitizerDialog(tk.Toplevel):
 
         self.after(0, self._set_default_pane_ratio)
         self.date_fmt.trace_add("write", lambda *_: self._on_date_fmt_change())
+        self.var_categories.trace_add("write", lambda *_: self._update_category_count())
         self._refresh_scale_ui()
 
     def _configure_tree_rowheight(self):
@@ -319,106 +347,198 @@ class ChartDigitizerDialog(tk.Toplevel):
         return self.y_scale.get() == AxisScale.DATE.value
 
     def _date_fmt_axis(self) -> str:
-        return "y" if self.chart_mode.get() == "bar" else "x"
+        return "y" if self.series_mode.get() == "bar" else "x"
 
     def _stride_mode(self) -> str:
-        raw = (self.var_stride.get() or "").strip().lower()
-        if raw.startswith("categorical") or raw == "categories":
-            return "categorical"
-        if raw.startswith("fixed"):
-            return "continuous"
-        if raw in ("continuous", "categorical"):
-            return raw
-        return "continuous"
+        if self.series_mode.get() == "bar":
+            return "categorical" if self.y_scale.get() == AxisScale.CATEGORICAL.value else "continuous"
+        return "categorical" if self.x_scale.get() == AxisScale.CATEGORICAL.value else "continuous"
+
+    def _stride_mode_for_calibration(self, cal: SeriesCalibration, chart_kind: str) -> str:
+        if chart_kind == "bar":
+            return "categorical" if cal.y_scale == AxisScale.CATEGORICAL.value else "continuous"
+        return "categorical" if cal.x_scale == AxisScale.CATEGORICAL.value else "continuous"
 
     def _on_x_scale_change(self) -> None:
         self._refresh_scale_ui()
         if self._is_x_date_scale() and self._date_fmt_axis() == "x":
-            self._ensure_date_values()
+            self._ensure_date_values("x")
             self._set_default_date_unit()
         self._update_tip()
 
     def _on_y_scale_change(self) -> None:
         self._refresh_scale_ui()
+        if self._is_y_date_scale() and self._date_fmt_axis() == "y":
+            self._ensure_date_values("y")
+            self._set_default_date_unit()
         self._update_tip()
 
     def _on_date_fmt_change(self) -> None:
         if self._date_fmt_axis() == "x" and self._is_x_date_scale():
-            self._ensure_date_values()
+            self._ensure_date_values("x")
+            self._set_default_date_unit()
+        if self._date_fmt_axis() == "y" and self._is_y_date_scale():
+            self._ensure_date_values("y")
             self._set_default_date_unit()
 
     def _on_x_step_unit_changed(self) -> None:
         self._date_unit_user_set = True
 
+    def _on_y_step_unit_changed(self) -> None:
+        self._date_unit_user_set = True
+
     def _refresh_scale_ui(self) -> None:
         date_axis = self._date_fmt_axis()
         is_date = self._is_x_date_scale() if date_axis == "x" else self._is_y_date_scale()
-        is_categorical = self._stride_mode() == "categorical"
+        is_bar = self.series_mode.get() == "bar"
+        cat_axis = "y" if is_bar else "x"
+        cat_scale = self.y_scale.get() if cat_axis == "y" else self.x_scale.get()
+        is_categorical = cat_scale == AxisScale.CATEGORICAL.value
+
+        # Limit categorical option to the active categorical axis.
+        x_values = [AxisScale.LINEAR.value, AxisScale.LOG10.value]
+        y_values = [AxisScale.LINEAR.value, AxisScale.LOG10.value]
+        if is_bar:
+            y_values.append(AxisScale.DATE.value)
+            y_values.append(AxisScale.CATEGORICAL.value)
+        else:
+            x_values.append(AxisScale.DATE.value)
+            x_values.append(AxisScale.CATEGORICAL.value)
+        self.cmb_x_scale.configure(values=x_values)
+        self.cmb_y_scale.configure(values=y_values)
+        if self.x_scale.get() not in x_values:
+            self.x_scale.set(AxisScale.LINEAR.value)
+        if self.y_scale.get() not in y_values:
+            self.y_scale.set(AxisScale.LINEAR.value)
 
         if is_date and not is_categorical:
-            self.lbl_date_fmt.grid()
-            self.cmb_date_fmt.grid()
             if date_axis == "x":
-                self.lbl_date_fmt.configure(text="Date fmt (X)")
+                self.lbl_date_fmt.configure(text="date fmt")
                 self.var_x0_label.set("x0 (date)")
                 self.var_x1_label.set("x1 (date)")
-                self.var_x_step_label.set("X step (date):")
+                self.var_x_step_label.set("step")
             else:
-                self.lbl_date_fmt.configure(text="Date fmt (Y)")
+                self.lbl_date_fmt.configure(text="date fmt")
+                self.var_y_step_label.set("step")
         else:
-            self.lbl_date_fmt.grid_remove()
-            self.cmb_date_fmt.grid_remove()
             self.var_x0_label.set("x0")
             self.var_x1_label.set("x1")
-            self.var_x_step_label.set("X step (line):")
+            self.var_x_step_label.set("step")
+            self.var_y_step_label.set("step")
+
+        self.lbl_date_fmt.grid_remove()
+        self.cmb_date_fmt.grid_remove()
+        if is_date and not is_categorical:
+            if date_axis == "x":
+                self.lbl_date_fmt.grid(row=2, column=0, sticky="w", pady=(6, 0))
+                self.cmb_date_fmt.grid(row=2, column=1, sticky="w", pady=(6, 0))
+            else:
+                self.lbl_date_fmt.grid(row=7, column=0, sticky="w", pady=(6, 0))
+                self.cmb_date_fmt.grid(row=7, column=1, sticky="w", pady=(6, 0))
 
         if is_categorical:
-            self.lbl_categories.grid()
-            self.ent_categories.grid()
+            if cat_axis == "y":
+                self.lbl_categories.configure(text="Categories (Y)")
+                self.lbl_y0.grid_remove()
+                self.ent_y0.grid_remove()
+                self.lbl_y1.grid_remove()
+                self.ent_y1.grid_remove()
+                self.lbl_y_step.grid_remove()
+                self.ent_y_step.grid_remove()
+                self.lbl_y_step_units.grid_remove()
+                self.cmb_y_step_units.grid_remove()
+                self.lbl_x0.grid()
+                self.ent_x0.grid()
+                self.lbl_x1.grid()
+                self.ent_x1.grid()
+            else:
+                self.lbl_categories.configure(text="Categories (X)")
+                self.lbl_x0.grid_remove()
+                self.ent_x0.grid_remove()
+                self.lbl_x1.grid_remove()
+                self.ent_x1.grid_remove()
+                self.lbl_x_step.grid_remove()
+                self.ent_x_step.grid_remove()
+                self.lbl_x_step_units.grid_remove()
+                self.cmb_x_step_units.grid_remove()
+                self.lbl_y0.grid()
+                self.ent_y0.grid()
+                self.lbl_y1.grid()
+                self.ent_y1.grid()
+            if cat_axis == "y":
+                self.lbl_categories.grid(row=9, column=0, sticky="w", pady=(6, 0))
+                self.ent_categories.grid(row=9, column=1, columnspan=4, sticky="ew", pady=(6, 0))
+                self.lbl_categories_count.grid(row=9, column=5, sticky="e", padx=(8, 0), pady=(6, 0))
+            else:
+                self.lbl_categories.grid(row=4, column=0, sticky="w", pady=(6, 0))
+                self.ent_categories.grid(row=4, column=1, columnspan=4, sticky="ew", pady=(6, 0))
+                self.lbl_categories_count.grid(row=4, column=5, sticky="e", padx=(8, 0), pady=(6, 0))
             self._cat_row_visible = True
-            self.lbl_x0.grid_remove()
-            self.ent_x0.grid_remove()
-            self.lbl_x1.grid_remove()
-            self.ent_x1.grid_remove()
             self._ensure_categories_default()
+            self._update_category_count()
         else:
             self.lbl_categories.grid_remove()
             self.ent_categories.grid_remove()
+            self.lbl_categories_count.grid_remove()
             self._cat_row_visible = False
             self.lbl_x0.grid()
             self.ent_x0.grid()
             self.lbl_x1.grid()
             self.ent_x1.grid()
+            self.lbl_x_step.grid()
+            self.ent_x_step.grid()
+            self.lbl_x_step_units.grid()
+            self.cmb_x_step_units.grid()
+            self.lbl_y0.grid()
+            self.ent_y0.grid()
+            self.lbl_y1.grid()
+            self.ent_y1.grid()
+            self.lbl_y_step.grid()
+            self.ent_y_step.grid()
+            self.lbl_y_step_units.grid()
+            self.cmb_y_step_units.grid()
 
-        show_x_step = not (
-            self.chart_mode.get() in ("scatter", "bar")
-            or self._stride_mode() == "categorical"
-        )
+        show_x_step = (not is_bar) and (self.series_mode.get() != "scatter") and not (is_categorical and cat_axis == "x")
         if show_x_step:
-            if not getattr(self, "_x_step_row_visible", True):
-                self._x_step_row.pack(fill="x")
-                self._x_step_row_visible = True
+            self.lbl_x_step.grid()
+            self.ent_x_step.grid()
+            self.lbl_x_step_units.grid()
+            self.cmb_x_step_units.grid()
         else:
-            if getattr(self, "_x_step_row_visible", True):
-                self._x_step_row.pack_forget()
-                self._x_step_row_visible = False
+            self.lbl_x_step.grid_remove()
+            self.ent_x_step.grid_remove()
+            self.lbl_x_step_units.grid_remove()
+            self.cmb_x_step_units.grid_remove()
 
-        show_units = (is_date and show_x_step and (not is_categorical) and date_axis == "x")
-        if show_units:
-            if not getattr(self, "_x_step_units_visible", True):
-                self.lbl_x_step_units.pack(side="left", padx=(8, 0))
-                self.cmb_x_step_units.pack(side="left", padx=(6, 0))
-                self._x_step_units_visible = True
+        show_x_units = (is_date and show_x_step and date_axis == "x")
+        if show_x_units:
+            self.lbl_x_step_units.grid()
+            self.cmb_x_step_units.grid()
         else:
-            if getattr(self, "_x_step_units_visible", True):
-                self.lbl_x_step_units.pack_forget()
-                self.cmb_x_step_units.pack_forget()
-                self._x_step_units_visible = False
+            self.lbl_x_step_units.grid_remove()
+            self.cmb_x_step_units.grid_remove()
 
-        if is_categorical:
-            self.cmb_x_scale.configure(state="disabled")
+        show_y_step = is_bar and not (is_categorical and cat_axis == "y")
+        if show_y_step:
+            self.lbl_y_step.grid()
+            self.ent_y_step.grid()
+            self.lbl_y_step_units.grid()
+            self.cmb_y_step_units.grid()
         else:
-            self.cmb_x_scale.configure(state="readonly")
+            self.lbl_y_step.grid_remove()
+            self.ent_y_step.grid_remove()
+            self.lbl_y_step_units.grid_remove()
+            self.cmb_y_step_units.grid_remove()
+
+        show_y_units = (is_date and show_y_step and date_axis == "y")
+        if show_y_units:
+            self.lbl_y_step_units.grid()
+            self.cmb_y_step_units.grid()
+        else:
+            self.lbl_y_step_units.grid_remove()
+            self.cmb_y_step_units.grid_remove()
+
+        self.cmb_x_scale.configure(state="readonly")
 
     def _default_date_unit_for_fmt(self, fmt: str) -> str:
         fmt = fmt or ""
@@ -442,36 +562,66 @@ class ChartDigitizerDialog(tk.Toplevel):
 
     def _set_default_date_unit(self) -> None:
         default = self._default_date_unit_for_fmt(self.date_fmt.get())
-        if (not self._date_unit_user_set) or (self.var_x_step_unit.get() == (self._date_unit_auto or "")):
-            self.var_x_step_unit.set(default)
-            self._date_unit_auto = default
+        if self._date_fmt_axis() == "y":
+            if (not self._date_unit_user_set) or (self.var_y_step_unit.get() == (self._date_unit_auto or "")):
+                self.var_y_step_unit.set(default)
+                self._date_unit_auto = default
+        else:
+            if (not self._date_unit_user_set) or (self.var_x_step_unit.get() == (self._date_unit_auto or "")):
+                self.var_x_step_unit.set(default)
+                self._date_unit_auto = default
 
     def _ensure_categories_default(self) -> None:
         if not self.var_categories.get().strip():
             self.var_categories.set("x1;x2;x3")
 
-    def _parse_categories(self) -> List[str]:
-        raw = self.var_categories.get()
+    def _normalize_categories(self, raw: str) -> str:
+        parts = [p.strip() for p in (raw or "").split(";")]
+        return ";".join([p for p in parts if p])
+
+    def _parse_categories(self, raw: Optional[str] = None) -> List[str]:
+        if raw is None:
+            raw = self.var_categories.get()
         parts = [p.strip() for p in (raw or "").split(";")]
         return [p for p in parts if p]
 
-    def _category_centers_px(self, count: int, *, axis: str) -> List[float]:
+    def _update_category_count(self) -> None:
+        if not getattr(self, "_cat_row_visible", False):
+            self.lbl_categories_count.configure(text="")
+            return
+        count = len(self._parse_categories())
+        self.lbl_categories_count.configure(text=f"{count} cats")
+
+    def _category_centers_px(self, count: int, *, axis: str, axis_px: Optional[Tuple[int, int]] = None) -> List[float]:
         if count <= 1:
+            if axis_px is None:
+                if axis == "y":
+                    p0, p1 = self._y_axis_px()
+                else:
+                    p0, p1 = self._x_axis_px()
+            else:
+                p0, p1 = axis_px
+            return [float(p0)]
+
+        if axis_px is None:
             if axis == "y":
                 p0, p1 = self._y_axis_px()
             else:
                 p0, p1 = self._x_axis_px()
-            return [float(p0)]
-
-        if axis == "y":
-            p0, p1 = self._y_axis_px()
         else:
-            p0, p1 = self._x_axis_px()
+            p0, p1 = axis_px
         step = (float(p1) - float(p0)) / float(count - 1)
         return [float(p0) + (i * step) for i in range(count)]
 
-    def _category_offset_px(self, count: int, *, axis: str, seed_px: Tuple[int, int]) -> float:
-        centers = self._category_centers_px(count, axis=axis)
+    def _category_offset_px(
+        self,
+        count: int,
+        *,
+        axis: str,
+        seed_px: Tuple[int, int],
+        axis_px: Optional[Tuple[int, int]] = None,
+    ) -> float:
+        centers = self._category_centers_px(count, axis=axis, axis_px=axis_px)
         if not centers:
             return 0.0
         if axis == "y":
@@ -481,7 +631,201 @@ class ChartDigitizerDialog(tk.Toplevel):
         idx = int(np.argmin([abs(pos - c) for c in centers]))
         return float(pos - centers[idx])
 
-    def _ensure_date_values(self) -> None:
+    def _calibration_key_from_ui(self) -> tuple:
+        roi = self._roi_px()
+        x_axis_px = self._x_axis_px()
+        y_axis_px = self._y_axis_px()
+        x0_val = (self.var_x0_val.get() or "").strip()
+        x1_val = (self.var_x1_val.get() or "").strip()
+        y0_val = (self.var_y0_val.get() or "").strip()
+        y1_val = (self.var_y1_val.get() or "").strip()
+        categories = self._normalize_categories(self.var_categories.get())
+        x_scale = (self.x_scale.get() or "").strip()
+        y_scale = (self.y_scale.get() or "").strip()
+        date_fmt = (self.date_fmt.get() or "").strip()
+        x_step = float(self.var_x_step.get())
+        x_step_unit = (self.var_x_step_unit.get() or "").strip().lower()
+        y_step = float(self.var_y_step.get())
+        y_step_unit = (self.var_y_step_unit.get() or "").strip().lower()
+        return (
+            roi,
+            x_axis_px,
+            y_axis_px,
+            x0_val,
+            x1_val,
+            y0_val,
+            y1_val,
+            categories,
+            x_scale,
+            y_scale,
+            date_fmt,
+            x_step,
+            x_step_unit,
+            y_step,
+            y_step_unit,
+        )
+
+    def _calibration_key_from_series(self, s: Series) -> tuple:
+        cal = s.calibration
+        return (
+            cal.roi_px,
+            cal.x_axis_px,
+            cal.y_axis_px,
+            cal.x0_val,
+            cal.x1_val,
+            cal.y0_val,
+            cal.y1_val,
+            cal.categories,
+            cal.x_scale,
+            cal.y_scale,
+            cal.date_fmt,
+            cal.x_step,
+            cal.x_step_unit,
+            cal.y_step,
+            cal.y_step_unit,
+        )
+
+    def _make_series_calibration_from_ui(self) -> SeriesCalibration:
+        key = self._calibration_key_from_ui()
+        name = self._calibration_names.get(key)
+        if name is None:
+            name = f"calib{self._next_calibration_id}"
+            self._next_calibration_id += 1
+            self._calibration_names[key] = name
+        (
+            roi,
+            x_axis_px,
+            y_axis_px,
+            x0_val,
+            x1_val,
+            y0_val,
+            y1_val,
+            categories,
+            x_scale,
+            y_scale,
+            date_fmt,
+            x_step,
+            x_step_unit,
+            y_step,
+            y_step_unit,
+        ) = key
+        return SeriesCalibration(
+            name=name,
+            roi_px=roi,
+            x_axis_px=x_axis_px,
+            y_axis_px=y_axis_px,
+            x0_val=x0_val,
+            x1_val=x1_val,
+            y0_val=y0_val,
+            y1_val=y1_val,
+            categories=categories,
+            x_scale=x_scale,
+            y_scale=y_scale,
+            date_fmt=date_fmt,
+            x_step=float(x_step),
+            x_step_unit=x_step_unit,
+            y_step=float(y_step),
+            y_step_unit=y_step_unit,
+        )
+
+    def _apply_series_calibration_to_ui(self, cal: SeriesCalibration) -> None:
+        self.state.xmin_px, self.state.ymin_px, self.state.xmax_px, self.state.ymax_px = cal.roi_px
+        self.state.x0_px, self.state.x1_px = cal.x_axis_px
+        self.state.y0_px, self.state.y1_px = cal.y_axis_px
+        self.var_x0_val.set(cal.x0_val)
+        self.var_x1_val.set(cal.x1_val)
+        self.var_y0_val.set(cal.y0_val)
+        self.var_y1_val.set(cal.y1_val)
+        self.var_categories.set(cal.categories)
+        self.x_scale.set(cal.x_scale)
+        self.y_scale.set(cal.y_scale)
+        self.date_fmt.set(cal.date_fmt)
+        self.var_x_step.set(float(cal.x_step))
+        self.var_x_step_unit.set(cal.x_step_unit)
+        self.var_y_step.set(float(cal.y_step))
+        self.var_y_step_unit.set(cal.y_step_unit)
+        self._date_unit_user_set = True
+        self._refresh_scale_ui()
+        self._update_tip()
+        self._redraw_overlay()
+
+    def _set_ui_mode_from_series(self, s: Series) -> None:
+        kind = getattr(s, "chart_kind", getattr(s, "mode", "line"))
+        self.series_mode.set(kind)
+
+    def _pixel_bounds_changes(self, old: SeriesCalibration, new: SeriesCalibration) -> List[str]:
+        changes: List[str] = []
+        if old.roi_px != new.roi_px:
+            changes.append("ROI")
+        if old.x_axis_px != new.x_axis_px:
+            changes.append("X axis pixels")
+        if old.y_axis_px != new.y_axis_px:
+            changes.append("Y axis pixels")
+        return changes
+
+    def _apply_calibration_to_series(self, targets: List[Series]) -> None:
+        if not targets:
+            messagebox.showinfo("Calibration", "No series to update.")
+            return
+
+        mode = self.series_mode.get()
+        mismatched = [s for s in targets if getattr(s, "chart_kind", s.mode) != mode]
+        if mismatched:
+            messagebox.showinfo(
+                "Calibration",
+                "Series type changes are not supported. Create a new series for a different type."
+            )
+            targets = [s for s in targets if s not in mismatched]
+        if not targets:
+            messagebox.showinfo("Calibration", "No series updated (series type mismatch).")
+            return
+
+        new_cal = self._make_series_calibration_from_ui()
+        to_reextract: List[Series] = []
+        change_set: set[str] = set()
+        updated = 0
+
+        for s in targets:
+            changes = self._pixel_bounds_changes(s.calibration, new_cal)
+            updated += 1
+            if changes:
+                to_reextract.append(s)
+                change_set.update(changes)
+            s.calibration = new_cal
+            s.stride_mode = self._stride_mode_for_calibration(new_cal, getattr(s, "chart_kind", s.mode))
+            self._update_tree_row(s)
+
+        if to_reextract:
+            messagebox.showinfo(
+                "Calibration",
+                f"Re-extracting {len(to_reextract)} series because pixel bounds changed: "
+                + ", ".join(sorted(change_set))
+            )
+            for s in to_reextract:
+                try:
+                    self._extract_series(s)
+                except Exception as e:
+                    messagebox.showerror("Series extraction failed", str(e))
+        else:
+            messagebox.showinfo("Calibration", f"Updated {updated} series. No re-extraction needed.")
+        self._redraw_overlay()
+
+    def _apply_calibration_to_selected(self) -> None:
+        if self._active_series_id is None:
+            messagebox.showinfo("Calibration", "Select a series first.")
+            return
+        s = self._get_series(self._active_series_id)
+        if s is None:
+            return
+        self._apply_calibration_to_series([s])
+
+    def _apply_calibration_to_all(self) -> None:
+        if not self.series:
+            messagebox.showinfo("Calibration", "No series to update yet.")
+            return
+        self._apply_calibration_to_series(list(self.series))
+
+    def _ensure_date_values(self, axis: str = "x") -> None:
         fmt = self.date_fmt.get().strip() or "%Y"
 
         def _valid_date(s: str) -> bool:
@@ -492,14 +836,24 @@ class ChartDigitizerDialog(tk.Toplevel):
                 return False
 
         base = datetime(2000, 1, 1)
-        x0 = self.var_x0_val.get().strip()
-        x1 = self.var_x1_val.get().strip()
+        if axis == "y":
+            x0 = self.var_y0_val.get().strip()
+            x1 = self.var_y1_val.get().strip()
+        else:
+            x0 = self.var_x0_val.get().strip()
+            x1 = self.var_x1_val.get().strip()
 
         if not x0 or not _valid_date(x0):
-            self.var_x0_val.set(base.strftime(fmt))
+            if axis == "y":
+                self.var_y0_val.set(base.strftime(fmt))
+            else:
+                self.var_x0_val.set(base.strftime(fmt))
         if not x1 or not _valid_date(x1):
             x1_dt = self._add_months(base, 12)
-            self.var_x1_val.set(x1_dt.strftime(fmt))
+            if axis == "y":
+                self.var_y1_val.set(x1_dt.strftime(fmt))
+            else:
+                self.var_x1_val.set(x1_dt.strftime(fmt))
 
     @staticmethod
     def _last_day_of_month(year: int, month: int) -> int:
@@ -568,7 +922,7 @@ class ChartDigitizerDialog(tk.Toplevel):
 
     def _update_tip(self):
         mode = self.tool_mode.get()
-        chart_mode = self.chart_mode.get()  # line|scatter|column|bar|area
+        series_mode = self.series_mode.get()  # line|scatter|column|bar|area
 
         if mode == "roi":
             msg = (
@@ -589,13 +943,13 @@ class ChartDigitizerDialog(tk.Toplevel):
                 "These ticks define the mapping from image pixels to chart units for the Y axis."
             )
         elif mode == "addseries":
-            if chart_mode == "scatter":
+            if series_mode == "scatter":
                 msg = (
                     "Add series (Scatter): Click a marker color to pick the series. "
                     "The tool detects colored marker blobs inside the region and exports their (x,y) coordinates. "
                     "X step is ignored in scatter mode."
                 )
-            elif chart_mode == "line":
+            elif series_mode == "line":
                 msg = (
                     "Add series (Line): Click directly on a line in the chart to generate the series data. "
                     "The tool tracks the line from the clicked point across the region and samples it onto the X grid. "
@@ -603,28 +957,28 @@ class ChartDigitizerDialog(tk.Toplevel):
                     "Color tol controls how closely pixels must match the clicked color. "
                     "Ctrl+click adds detection seeds (shown as cyan rings) and rebuilds the line trace."
                 )
-            elif chart_mode == "column":
+            elif series_mode == "column":
                 msg = (
                     "Add series (Column): Click inside a bar segment to pick its color. "
                     "The tool reads the bar boundary (usually the outline) to estimate the value. "
-                    "Stride=Categorical auto-detects bar centers; Stride=Continuous samples on the X grid. "
+                    "Set X scale to categorical to auto-detect bar centers; otherwise samples on the X grid. "
                     "Stacked indicates the series is a cumulative boundary; export can emit deltas between boundaries."
                 )
-            elif chart_mode == "bar":
+            elif series_mode == "bar":
                 msg = (
                     "Add series (Bar): Click inside a horizontal bar segment to pick its color. "
                     "The tool reads the bar boundary (usually the outline) to estimate the value. "
-                    "Stride=Categorical auto-detects bar centers along Y. "
+                    "Set Y scale to categorical to auto-detect bar centers along Y. "
                     "Stacked indicates the series is a cumulative boundary; export can emit deltas between boundaries."
                 )
             else:  # area
                 msg = (
                     "Add series (Area): Click inside a filled area to pick its color. "
                     "The tool reads the outer area boundary (usually the outline) to estimate the value. "
-                    "Stride=Continuous samples on the X grid; Stride=Categorical can auto-detect distinct x-runs."
+                    "Set X scale to categorical to auto-detect distinct x-runs; otherwise samples on the X grid."
                 )
         elif mode == "editseries":
-            if chart_mode == "scatter":
+            if series_mode == "scatter":
                 msg = (
                     "Edit series (Scatter): Select a series in the table. Right-click toggles a point NA/disabled. "
                     "Drag points to reposition. Right-click away from points inserts a new point (auto-sorted by X). "
@@ -646,8 +1000,23 @@ class ChartDigitizerDialog(tk.Toplevel):
 
         self.tip_var.set(msg)
 
-    def _on_chart_mode_change(self):
-        if self.chart_mode.get() in ("column", "bar", "area"):
+    def _on_series_mode_change(self):
+        if getattr(self, "_suppress_series_mode_change", False):
+            return
+        if self.tool_mode.get() == "editseries" and self._active_series_id is not None:
+            s = self._get_series(self._active_series_id)
+            if s is not None:
+                desired = getattr(s, "chart_kind", s.mode)
+                if self.series_mode.get() != desired:
+                    messagebox.showinfo(
+                        "Series type",
+                        "Series type changes are not supported. Create a new series for a different type."
+                    )
+                    self._suppress_series_mode_change = True
+                    self.series_mode.set(desired)
+                    self._suppress_series_mode_change = False
+                    return
+        if self.series_mode.get() in ("column", "bar", "area"):
             self.var_prefer_outline.set(True)
         else:
             self.var_prefer_outline.set(False)
@@ -670,6 +1039,11 @@ class ChartDigitizerDialog(tk.Toplevel):
             self._pending_axis = "x0"
         elif mode == "yaxis":
             self._pending_axis = "y0"
+        elif mode == "editseries" and self._active_series_id is not None:
+            s = self._get_series(self._active_series_id)
+            if s is not None:
+                self._set_ui_mode_from_series(s)
+                self._apply_series_calibration_to_ui(s.calibration)
         self._update_tip()
         self._redraw_overlay()
 
@@ -799,6 +1173,17 @@ class ChartDigitizerDialog(tk.Toplevel):
                     self.canvas.create_oval(cx-(r-1), cy-(r-1), cx+(r-1), cy+(r-1),
                                             outline=color, width=2, fill="",
                                             tags=("overlay","seed"))
+        self._update_axis_pixels_label()
+
+    def _update_axis_pixels_label(self) -> None:
+        rx0, ry0, rx1, ry1 = self._roi_px()
+        x0_px, x1_px = self._x_axis_px()
+        y0_px, y1_px = self._y_axis_px()
+        self.axis_px_values.set(
+            f"image size: {self._iw}x{self._ih}\n"
+            f"data region: x: {rx0}:{rx1}, y: {ry0}:{ry1}\n"
+            f"x ticks x0:{x0_px} x1:{x1_px}, y ticks y0:{y0_px} y1:{y1_px}"
+        )
 
     # ---------- coordinate transforms ----------
     def _to_canvas(self, xpx: int, ypx: int) -> Tuple[int,int]:
@@ -1124,7 +1509,8 @@ class ChartDigitizerDialog(tk.Toplevel):
         self._next_series_id += 1
 
         name = f"Series {sid}"
-        mode = self.chart_mode.get()
+        mode = self.series_mode.get()
+        calibration = self._make_series_calibration_from_ui()
 
         s = Series(
             id=sid,
@@ -1132,8 +1518,9 @@ class ChartDigitizerDialog(tk.Toplevel):
             color_bgr=target,
             chart_kind=mode,
             stacked=bool(self.var_stacked.get()),
-            stride_mode=str(self._stride_mode()),
+            stride_mode=str(self._stride_mode_for_calibration(calibration, mode)),
             prefer_outline=bool(self.var_prefer_outline.get()),
+            calibration=calibration,
         )
         s.seed_px = (xpx, ypx)
         self.series.append(s)
@@ -1157,9 +1544,9 @@ class ChartDigitizerDialog(tk.Toplevel):
         - column/area: boundary read (top/bottom vs baseline) sampled by stride mode
         - bar: boundary read (left/right vs baseline) along categorical Y centers
         """
-        roi = self._roi_px()
+        roi = s.calibration.roi_px
         tol = int(self.var_tol.get())
-        cal = self._build_calibration()
+        cal = self._build_calibration(s.calibration)
 
         kind = getattr(s, "chart_kind", getattr(s, "mode", "line"))
         stride = getattr(s, "stride_mode", "continuous")
@@ -1224,26 +1611,26 @@ class ChartDigitizerDialog(tk.Toplevel):
 
         # ---------------- Line ----------------
         if kind == "line":
-            x0_val = self._require_value(self.var_x0_val.get(), "x0")
+            x0_val = self._require_value(s.calibration.x0_val, "x0", cal=s.calibration)
             roi_xmin_px, _, roi_xmax_px, _ = roi
             xmin = float(cal.x_px_to_data(roi_xmin_px))
             xmax = float(cal.x_px_to_data(roi_xmax_px))
             if xmin > xmax:
                 xmin, xmax = xmax, xmin
 
-            step = float(self.var_x_step.get())
+            step = float(s.calibration.x_step)
             x_grid: List[float] = []
             xpx_grid: List[int] = []
             if stride == "categorical":
-                labels = self._parse_categories()
+                labels = self._parse_categories(s.calibration.categories)
                 if labels:
-                    centers = self._category_centers_px(len(labels), axis="x")
+                    centers = self._category_centers_px(len(labels), axis="x", axis_px=s.calibration.x_axis_px)
                     xpx_grid = [int(round(p)) for p in centers]
                     x_grid = [float(i + 1) for i in range(len(labels))]
             if not x_grid:
-                if self._is_x_date_scale():
+                if s.calibration.x_scale == AxisScale.DATE.value:
                     x_grid = self._build_date_grid_aligned(
-                        xmin, xmax, step, self.var_x_step_unit.get(), anchor=x0_val
+                        xmin, xmax, step, s.calibration.x_step_unit, anchor=x0_val
                     )
                 else:
                     x_grid = build_x_grid_aligned(xmin, xmax, step, anchor=x0_val)
@@ -1265,8 +1652,8 @@ class ChartDigitizerDialog(tk.Toplevel):
             for ypx in ypx_raw:
                 y_data_raw.append(None if ypx is None else float(cal.y_px_to_data(int(ypx))))
 
-            y0_val = self._require_value(self.var_y0_val.get(), "y0")
-            y1_val = self._require_value(self.var_y1_val.get(), "y1")
+            y0_val = self._require_value(s.calibration.y0_val, "y0", cal=s.calibration)
+            y1_val = self._require_value(s.calibration.y1_val, "y1", cal=s.calibration)
             fallback_y = 0.5 * (y0_val + y1_val)
 
             y_filled = enforce_line_grid(x_grid, y_data_raw, fallback_y=fallback_y)
@@ -1289,12 +1676,17 @@ class ChartDigitizerDialog(tk.Toplevel):
         if kind in ("column", "area"):
             # Determine sampling xpx_grid
             if stride == "categorical":
-                labels = self._parse_categories()
+                labels = self._parse_categories(s.calibration.categories)
                 if labels:
-                    centers = self._category_centers_px(len(labels), axis="x")
+                    centers = self._category_centers_px(len(labels), axis="x", axis_px=s.calibration.x_axis_px)
                     offset = 0.0
                     if kind == "column" and s.seed_px is not None:
-                        offset = self._category_offset_px(len(labels), axis="x", seed_px=s.seed_px)
+                        offset = self._category_offset_px(
+                            len(labels),
+                            axis="x",
+                            seed_px=s.seed_px,
+                            axis_px=s.calibration.x_axis_px,
+                        )
                     xpx_grid = [int(round(p + offset)) for p in centers]
                     x_grid = [float(i + 1) for i in range(len(labels))]
                 else:
@@ -1302,16 +1694,16 @@ class ChartDigitizerDialog(tk.Toplevel):
                     xpx_grid = [int(x0 + c) for c in centers]
                     x_grid = [float(cal.x_px_to_data(xpx)) for xpx in xpx_grid]
             else:
-                x0_val = self._require_value(self.var_x0_val.get(), "x0")
+                x0_val = self._require_value(s.calibration.x0_val, "x0", cal=s.calibration)
                 roi_xmin_px, _, roi_xmax_px, _ = roi
                 xmin = float(cal.x_px_to_data(roi_xmin_px))
                 xmax = float(cal.x_px_to_data(roi_xmax_px))
                 if xmin > xmax:
                     xmin, xmax = xmax, xmin
-                step = float(self.var_x_step.get())
-                if self._is_x_date_scale():
+                step = float(s.calibration.x_step)
+                if s.calibration.x_scale == AxisScale.DATE.value:
                     x_grid = self._build_date_grid_aligned(
-                        xmin, xmax, step, self.var_x_step_unit.get(), anchor=x0_val
+                        xmin, xmax, step, s.calibration.x_step_unit, anchor=x0_val
                     )
                 else:
                     x_grid = build_x_grid_aligned(xmin, xmax, step, anchor=x0_val)
@@ -1326,7 +1718,7 @@ class ChartDigitizerDialog(tk.Toplevel):
             except Exception:
                 baseline_y_px = None
             if baseline_y_px is None:
-                baseline_y_px = self._y_axis_px()[0]  # y0 tick (defaults to bottom ROI)
+                baseline_y_px = s.calibration.y_axis_px[0]  # y0 tick (defaults to bottom ROI)
 
             sx, sy = s.seed_px
             prefer_top = (sy < int(baseline_y_px))
@@ -1355,8 +1747,8 @@ class ChartDigitizerDialog(tk.Toplevel):
                 y_data_raw.append(None if ypx is None else float(cal.y_px_to_data(int(ypx))))
 
             if stride == "continuous":
-                y0_val = self._require_value(self.var_y0_val.get(), "y0")
-                y1_val = self._require_value(self.var_y1_val.get(), "y1")
+                y0_val = self._require_value(s.calibration.y0_val, "y0", cal=s.calibration)
+                y1_val = self._require_value(s.calibration.y1_val, "y1", cal=s.calibration)
                 fallback_y = 0.5 * (y0_val + y1_val)
                 y_filled = enforce_line_grid(list(x_grid), y_data_raw, fallback_y=fallback_y)
 
@@ -1392,12 +1784,17 @@ class ChartDigitizerDialog(tk.Toplevel):
         # ---------------- Bar (horizontal) ----------------
         if kind == "bar":
             # For bars, categorical is the dominant case (categories along Y).
-            labels = self._parse_categories()
+            labels = self._parse_categories(s.calibration.categories)
             if labels:
-                centers = self._category_centers_px(len(labels), axis="y")
+                centers = self._category_centers_px(len(labels), axis="y", axis_px=s.calibration.y_axis_px)
                 offset = 0.0
                 if s.seed_px is not None:
-                    offset = self._category_offset_px(len(labels), axis="y", seed_px=s.seed_px)
+                    offset = self._category_offset_px(
+                        len(labels),
+                        axis="y",
+                        seed_px=s.seed_px,
+                        axis_px=s.calibration.y_axis_px,
+                    )
                 ypx_grid = [int(round(p + offset)) for p in centers]
                 cat_grid = [float(i + 1) for i in range(len(labels))]
             else:
@@ -1417,7 +1814,7 @@ class ChartDigitizerDialog(tk.Toplevel):
             except Exception:
                 baseline_x_px = None
             if baseline_x_px is None:
-                baseline_x_px = self._x_axis_px()[0]  # x0 tick (defaults to left ROI)
+                baseline_x_px = s.calibration.x_axis_px[0]  # x0 tick (defaults to left ROI)
 
             sx, sy = s.seed_px
             prefer_right = (sx > int(baseline_x_px))
@@ -1462,26 +1859,41 @@ class ChartDigitizerDialog(tk.Toplevel):
         raise ValueError(f"Unsupported chart kind: {kind}")
 
 
-    def _require_value(self, s: str, label: str) -> float:
+    def _require_value(self, s: str, label: str, *, cal: Optional[SeriesCalibration] = None) -> float:
         s = (s or "").strip()
         if not s:
             raise ValueError(f"Missing {label} value. Enter it in the Calibration panel.")
-        cal = self._build_calibration()
+        chart_cal = self._build_calibration(cal)
         if label.startswith("x"):
-            return float(cal.parse_x_value(s))
+            return float(chart_cal.parse_x_value(s))
         if label.startswith("y"):
-            return float(cal.parse_y_value(s))
+            return float(chart_cal.parse_y_value(s))
         return float(s)
 
-    def _build_calibration(self) -> ChartCalibration:
+    def _build_calibration(self, cal: Optional[SeriesCalibration] = None) -> ChartCalibration:
         # Use ROI bounds if axis pixels not set
-        x0,y0,x1,y1 = self._roi_px()
-        x0_px, x1_px = self._x_axis_px()
-        y0_px, y1_px = self._y_axis_px()
-
-        xs = AxisScale(self.x_scale.get())
-        ys = AxisScale(self.y_scale.get())
-        date_fmt = self.date_fmt.get().strip() or "%Y"
+        if cal is None:
+            x0, y0, x1, y1 = self._roi_px()
+            x0_px, x1_px = self._x_axis_px()
+            y0_px, y1_px = self._y_axis_px()
+            xs = AxisScale(self.x_scale.get())
+            ys = AxisScale(self.y_scale.get())
+            date_fmt = self.date_fmt.get().strip() or "%Y"
+            x0v_str = (self.var_x0_val.get() or "").strip()
+            x1v_str = (self.var_x1_val.get() or "").strip()
+            y0v_str = (self.var_y0_val.get() or "").strip()
+            y1v_str = (self.var_y1_val.get() or "").strip()
+        else:
+            x0, y0, x1, y1 = cal.roi_px
+            x0_px, x1_px = cal.x_axis_px
+            y0_px, y1_px = cal.y_axis_px
+            xs = AxisScale(cal.x_scale)
+            ys = AxisScale(cal.y_scale)
+            date_fmt = (cal.date_fmt or "").strip() or "%Y"
+            x0v_str = (cal.x0_val or "").strip()
+            x1v_str = (cal.x1_val or "").strip()
+            y0v_str = (cal.y0_val or "").strip()
+            y1v_str = (cal.y1_val or "").strip()
 
         # values may be blank; use placeholders 0..1 to allow editing/overlay
         def parse_float_or_default(v: str, d: float) -> float:
@@ -1494,8 +1906,6 @@ class ChartDigitizerDialog(tk.Toplevel):
 
         import math
         # Parse X values
-        x0v_str = self.var_x0_val.get().strip()
-        x1v_str = self.var_x1_val.get().strip()
         if xs == AxisScale.DATE:
             x0v = _parse_date_safe(x0v_str or "2000", date_fmt)
             x1v = _parse_date_safe(x1v_str or "2001", date_fmt)
@@ -1503,8 +1913,6 @@ class ChartDigitizerDialog(tk.Toplevel):
             x0v = float(x0v_str) if x0v_str else 0.0
             x1v = float(x1v_str) if x1v_str else 1.0
 
-        y0v_str = self.var_y0_val.get().strip()
-        y1v_str = self.var_y1_val.get().strip()
         if ys == AxisScale.DATE:
             y0v = _parse_date_safe(y0v_str or "2000", date_fmt)
             y1v = _parse_date_safe(y1v_str or "2001", date_fmt)
@@ -1518,11 +1926,19 @@ class ChartDigitizerDialog(tk.Toplevel):
 
     # ---------- Tree interactions ----------
     def _insert_tree_row(self, s: Series):
-        self.tree.insert("", "end", iid=str(s.id), values=("Y" if s.enabled else "N", s.name, len(s.points)))
+        self.tree.insert(
+            "",
+            "end",
+            iid=str(s.id),
+            values=("Y" if s.enabled else "N", s.name, s.calibration.name, len(s.points)),
+        )
 
     def _update_tree_row(self, s: Series):
         if self.tree.exists(str(s.id)):
-            self.tree.item(str(s.id), values=("Y" if s.enabled else "N", s.name, len(s.points)))
+            self.tree.item(
+                str(s.id),
+                values=("Y" if s.enabled else "N", s.name, s.calibration.name, len(s.points)),
+            )
 
     def _on_tree_select(self, _evt=None):
         sel = self.tree.selection()
@@ -1530,6 +1946,11 @@ class ChartDigitizerDialog(tk.Toplevel):
             self._active_series_id = None
         else:
             self._active_series_id = int(sel[0])
+            if self.tool_mode.get() == "editseries":
+                s = self._get_series(self._active_series_id)
+                if s is not None:
+                    self._set_ui_mode_from_series(s)
+                    self._apply_series_calibration_to_ui(s.calibration)
         self._redraw_overlay()
 
     def _select_series(self, sid: int):
@@ -1587,6 +2008,49 @@ class ChartDigitizerDialog(tk.Toplevel):
         self._update_tree_row(s)
 
     # ---------- Export ----------
+    def _apply_stacked_deltas(self, ordered: List[Series]) -> List[Series]:
+        if not any(getattr(s, "stacked", False) for s in ordered):
+            return ordered
+
+        prev_by_cal: dict[tuple, Series] = {}
+        deltas: List[Series] = []
+        for s in ordered:
+            if not getattr(s, "stacked", False):
+                deltas.append(s)
+                continue
+
+            key = self._calibration_key_from_series(s)
+            prev = prev_by_cal.get(key)
+
+            ds = Series(
+                id=s.id,
+                name=s.name,
+                color_bgr=s.color_bgr,
+                chart_kind=s.chart_kind,
+                stacked=s.stacked,
+                stride_mode=s.stride_mode,
+                prefer_outline=s.prefer_outline,
+                enabled=s.enabled,
+                calibration=s.calibration,
+            )
+            ds.points = []
+            ds.point_enabled = []
+            for i, (x, y) in enumerate(s.points):
+                ok = bool(s.point_enabled[i]) if s.point_enabled else True
+                if prev is None:
+                    ds.points.append((float(x), float(y)))
+                    ds.point_enabled.append(ok)
+                else:
+                    ok_prev = bool(prev.point_enabled[i]) if prev.point_enabled else True
+                    ok2 = ok and ok_prev
+                    y_prev = float(prev.points[i][1])
+                    ds.points.append((float(x), float(y) - y_prev))
+                    ds.point_enabled.append(ok2)
+            deltas.append(ds)
+            prev_by_cal[key] = s
+
+        return deltas
+
     def _prepare_wide_export(self, enabled: List[Series]) -> Tuple[List[float], List[Series]]:
         """
         Prepare x_grid and aligned per-series points for wide CSV export.
@@ -1611,10 +2075,10 @@ class ChartDigitizerDialog(tk.Toplevel):
         if not any_categorical:
             x_grid = [float(x) for (x, _y) in non_scatter[0].points]
             # Ensure all series are aligned; if not, we still export as-is (best-effort).
-            return x_grid, non_scatter
+            return x_grid, self._apply_stacked_deltas(non_scatter)
 
         # --- categorical binning ---
-        labels = self._parse_categories()
+        labels = self._parse_categories(non_scatter[0].calibration.categories)
         if labels:
             count = len(labels)
         else:
@@ -1634,7 +2098,8 @@ class ChartDigitizerDialog(tk.Toplevel):
             aligned_series: List[Series] = []
             for s in non_scatter:
                 axis = _axis_for_series(s)
-                centers_px = self._category_centers_px(count, axis=axis)
+                axis_px = s.calibration.y_axis_px if axis == "y" else s.calibration.x_axis_px
+                centers_px = self._category_centers_px(count, axis=axis, axis_px=axis_px)
 
                 y_by_bin: List[Optional[float]] = [None] * count
                 en_by_bin: List[bool] = [False] * count
@@ -1660,54 +2125,20 @@ class ChartDigitizerDialog(tk.Toplevel):
                     stride_mode="categorical",
                     prefer_outline=bool(getattr(s, "prefer_outline", True)),
                     enabled=s.enabled,
+                    calibration=s.calibration,
                 )
                 ss.points = [(float(i + 1), 0.0 if y_by_bin[i] is None else float(y_by_bin[i])) for i in range(count)]
                 ss.point_enabled = [bool(en_by_bin[i]) for i in range(count)]
                 aligned_series.append(ss)
 
-            # --- stacked deltas (optional) ---
-            if any(getattr(s, "stacked", False) for s in aligned_series):
-                ordered = []
-                by_id = {s.id: s for s in aligned_series}
-                for s0 in non_scatter:
-                    if s0.id in by_id:
-                        ordered.append(by_id[s0.id])
+            # --- stacked deltas (optional, grouped by calibration) ---
+            ordered = []
+            by_id = {s.id: s for s in aligned_series}
+            for s0 in non_scatter:
+                if s0.id in by_id:
+                    ordered.append(by_id[s0.id])
 
-                deltas: List[Series] = []
-                prev: Optional[Series] = None
-                for s in ordered:
-                    if not getattr(s, "stacked", False):
-                        deltas.append(s)
-                        continue
-
-                    ds = Series(
-                        id=s.id,
-                        name=s.name,
-                        color_bgr=s.color_bgr,
-                        chart_kind=s.chart_kind,
-                        stacked=s.stacked,
-                        stride_mode=s.stride_mode,
-                        prefer_outline=s.prefer_outline,
-                        enabled=s.enabled,
-                    )
-                    ds.points = []
-                    ds.point_enabled = []
-                    for i, (x, y) in enumerate(s.points):
-                        ok = bool(s.point_enabled[i]) if s.point_enabled else True
-                        if prev is None:
-                            ds.points.append((float(x), float(y)))
-                            ds.point_enabled.append(ok)
-                        else:
-                            ok_prev = bool(prev.point_enabled[i]) if prev.point_enabled else True
-                            ok2 = ok and ok_prev
-                            y_prev = float(prev.points[i][1])
-                            ds.points.append((float(x), float(y) - y_prev))
-                            ds.point_enabled.append(ok2)
-                    deltas.append(ds)
-                    prev = s
-
-                aligned_series = deltas
-
+            aligned_series = self._apply_stacked_deltas(ordered)
             return x_grid, aligned_series
 
         # --- categorical binning fallback (auto) ---
@@ -1766,56 +2197,33 @@ class ChartDigitizerDialog(tk.Toplevel):
                 stride_mode="categorical",
                 prefer_outline=bool(getattr(s, "prefer_outline", True)),
                 enabled=s.enabled,
+                calibration=s.calibration,
             )
             ss.points = [(x_grid[i], 0.0 if y_by_bin[i] is None else float(y_by_bin[i])) for i in range(len(x_grid))]
             ss.point_enabled = [bool(en_by_bin[i]) for i in range(len(x_grid))]
             aligned_series.append(ss)
 
-        # --- stacked deltas (optional) ---
-        if any(getattr(s, "stacked", False) for s in aligned_series):
-            # Keep insertion order from enabled list for stacking
-            ordered = []
-            by_id = {s.id: s for s in aligned_series}
-            for s0 in non_scatter:
-                if s0.id in by_id:
-                    ordered.append(by_id[s0.id])
+        # --- stacked deltas (optional, grouped by calibration) ---
+        ordered = []
+        by_id = {s.id: s for s in aligned_series}
+        for s0 in non_scatter:
+            if s0.id in by_id:
+                ordered.append(by_id[s0.id])
 
-            deltas: List[Series] = []
-            prev: Optional[Series] = None
-            for s in ordered:
-                if not getattr(s, "stacked", False):
-                    deltas.append(s)
-                    continue
-
-                ds = Series(
-                    id=s.id,
-                    name=s.name,
-                    color_bgr=s.color_bgr,
-                    chart_kind=s.chart_kind,
-                    stacked=s.stacked,
-                    stride_mode=s.stride_mode,
-                    prefer_outline=s.prefer_outline,
-                    enabled=s.enabled,
-                )
-                ds.points = []
-                ds.point_enabled = []
-                for i, (x, y) in enumerate(s.points):
-                    ok = bool(s.point_enabled[i]) if s.point_enabled else True
-                    if prev is None:
-                        ds.points.append((float(x), float(y)))
-                        ds.point_enabled.append(ok)
-                    else:
-                        ok_prev = bool(prev.point_enabled[i]) if prev.point_enabled else True
-                        ok2 = ok and ok_prev
-                        y_prev = float(prev.points[i][1])
-                        ds.points.append((float(x), float(y) - y_prev))
-                        ds.point_enabled.append(ok2)
-                deltas.append(ds)
-                prev = s
-
-            aligned_series = deltas
-
+        aligned_series = self._apply_stacked_deltas(ordered)
         return x_grid, aligned_series
+
+    def _x_formatter_for_series(self, s: Series):
+        cal = self._build_calibration(s.calibration)
+        if getattr(s, "chart_kind", s.mode) == "bar" and cal.y.scale == AxisScale.DATE:
+            return cal.format_y_value
+        if cal.x.scale == AxisScale.DATE:
+            return cal.format_x_value
+        return None
+
+    def _format_x_for_series(self, s: Series, x: float):
+        fmt = self._x_formatter_for_series(s)
+        return fmt(x) if fmt else x
 
     def _append_csv(self):
         if not self.series:
@@ -1825,23 +2233,23 @@ class ChartDigitizerDialog(tk.Toplevel):
         enabled = [s for s in self.series if s.enabled]
         if not enabled:
             return
-
-        cal = self._build_calibration()
-        x_formatter = None
-        if not any(getattr(s, "stride_mode", "continuous") == "categorical" for s in enabled):
-            if self.chart_mode.get() == "bar" and cal.y.scale == AxisScale.DATE:
-                x_formatter = cal.format_y_value
-            elif cal.x.scale == AxisScale.DATE:
-                x_formatter = cal.format_x_value
+        selected = None
+        if self._active_series_id is not None:
+            selected = self._get_series(self._active_series_id)
+        if selected is None or selected not in enabled:
+            selected = enabled[0]
+        x_formatter = self._x_formatter_for_series(selected) if selected else None
 
         # If every enabled series is scatter, export long; otherwise export wide.
         if all(getattr(s, "chart_kind", s.mode) == "scatter" for s in enabled):
-            txt = long_csv_string(enabled, x_formatter=x_formatter)
+            txt = long_csv_string(enabled, x_formatter_by_series=self._format_x_for_series)
         else:
             x_grid, ser = self._prepare_wide_export(enabled)
             if not x_grid or not ser:
                 messagebox.showinfo("Append CSV", "Nothing to export (no valid points).")
                 return
+            if x_grid and isinstance(x_grid[0], str):
+                x_formatter = None
             txt = wide_csv_string(x_grid, ser, x_formatter=x_formatter)
 
         self._on_append_text(txt)
@@ -1864,21 +2272,22 @@ class ChartDigitizerDialog(tk.Toplevel):
         if not path:
             return
 
-        cal = self._build_calibration()
-        x_formatter = None
-        if not any(getattr(s, "stride_mode", "continuous") == "categorical" for s in enabled):
-            if self.chart_mode.get() == "bar" and cal.y.scale == AxisScale.DATE:
-                x_formatter = cal.format_y_value
-            elif cal.x.scale == AxisScale.DATE:
-                x_formatter = cal.format_x_value
+        selected = None
+        if self._active_series_id is not None:
+            selected = self._get_series(self._active_series_id)
+        if selected is None or selected not in enabled:
+            selected = enabled[0]
+        x_formatter = self._x_formatter_for_series(selected) if selected else None
 
         if all(getattr(s, "chart_kind", s.mode) == "scatter" for s in enabled):
-            write_long_csv(path, enabled, x_formatter=x_formatter)
+            write_long_csv(path, enabled, x_formatter_by_series=self._format_x_for_series)
         else:
             x_grid, ser = self._prepare_wide_export(enabled)
             if not x_grid or not ser:
                 messagebox.showinfo("Export CSV", "Nothing to export (no valid points).")
                 return
+            if x_grid and isinstance(x_grid[0], str):
+                x_formatter = None
             write_wide_csv(path, x_grid, ser, x_formatter=x_formatter)
 
         messagebox.showinfo("Export CSV", f"Saved:\n{path}")

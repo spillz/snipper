@@ -8,6 +8,26 @@ ChartKind = Literal["line", "scatter", "column", "bar", "area"]
 StrideMode = Literal["continuous", "categorical"]
 
 
+@dataclass(frozen=True)
+class SeriesCalibration:
+    name: str
+    roi_px: Tuple[int, int, int, int]
+    x_axis_px: Tuple[int, int]
+    y_axis_px: Tuple[int, int]
+    x0_val: str
+    x1_val: str
+    y0_val: str
+    y1_val: str
+    categories: str
+    x_scale: str
+    y_scale: str
+    date_fmt: str
+    x_step: float
+    x_step_unit: str
+    y_step: float
+    y_step_unit: str
+
+
 @dataclass
 class PointFlags:
     enabled: bool = True
@@ -18,6 +38,7 @@ class Series:
     id: int
     name: str
     color_bgr: Tuple[int, int, int]
+    calibration: SeriesCalibration
 
     # Primary chart kind for extraction/edit/export.
     # Backwards-compat: old code used mode in {"line","scatter"}.
@@ -33,6 +54,7 @@ class Series:
     prefer_outline: bool = True
 
     enabled: bool = True
+
 
     # Optional seed pixel (set when user clicks the chart)
     seed_px: Optional[Tuple[int, int]] = None

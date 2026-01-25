@@ -9,6 +9,7 @@ def series_to_long_rows(
     series: List[Series],
     *,
     x_formatter: Optional[Callable[[float], str]] = None,
+    x_formatter_by_series: Optional[Callable[[Series, float], str]] = None,
 ) -> List[Tuple[str, float, float | str]]:
     rows: List[Tuple[str, float, float | str]] = []
     for s in series:
@@ -17,7 +18,10 @@ def series_to_long_rows(
         for (x,y), ok in zip(s.points, s.point_enabled or [True]*len(s.points)):
             if not ok:
                 continue
-            rows.append((s.name, x_formatter(x) if x_formatter else x, y))
+            if x_formatter_by_series is not None:
+                rows.append((s.name, x_formatter_by_series(s, x), y))
+            else:
+                rows.append((s.name, x_formatter(x) if x_formatter else x, y))
     return rows
 
 def write_long_csv(
@@ -26,6 +30,7 @@ def write_long_csv(
     delimiter: str = ",",
     *,
     x_formatter: Optional[Callable[[float], str]] = None,
+    x_formatter_by_series: Optional[Callable[[Series, float], str]] = None,
 ) -> None:
     with open(path, "w", newline="", encoding="utf-8") as f:
         w = csv.writer(f, delimiter=delimiter)
@@ -39,7 +44,10 @@ def write_long_csv(
                     ok = s.point_enabled[i]
                 if not ok:
                     continue
-                w.writerow([s.name, x_formatter(x) if x_formatter else x, y])
+                if x_formatter_by_series is not None:
+                    w.writerow([s.name, x_formatter_by_series(s, x), y])
+                else:
+                    w.writerow([s.name, x_formatter(x) if x_formatter else x, y])
 
 def write_wide_csv(
     path: str,
@@ -101,6 +109,7 @@ def long_csv_string(
     delimiter: str = ",",
     *,
     x_formatter: Optional[Callable[[float], str]] = None,
+    x_formatter_by_series: Optional[Callable[[Series, float], str]] = None,
 ) -> str:
     import io
     buf = io.StringIO()
@@ -115,5 +124,8 @@ def long_csv_string(
                 ok = s.point_enabled[i]
             if not ok:
                 continue
-            w.writerow([s.name, x_formatter(x) if x_formatter else x, y])
+            if x_formatter_by_series is not None:
+                w.writerow([s.name, x_formatter_by_series(s, x), y])
+            else:
+                w.writerow([s.name, x_formatter(x) if x_formatter else x, y])
     return buf.getvalue().rstrip()
