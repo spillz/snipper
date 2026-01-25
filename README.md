@@ -1,3 +1,6 @@
+<!-- IMAGE: Snipping overlay selection -->
+![Snipping splash](images/snipper-banner.png)
+
 # Data Snipper
 
 A GUI application for scraping text and data from screengrabs that combines an OCR notepad and an integrated tool to convert charts to data.
@@ -35,6 +38,30 @@ Tesseract must be installed separately (pytessseract is just a binding). On Wind
 ```bash
 python snipper.py
 ```
+
+## Running with UV
+
+Use uv to replace pip, venv, and pip-tools with a single, extremely fast tool that creates fully reproducible Python environments in seconds.
+
+```bash
+uv venv
+uv pip install -e .
+uv run python snipper.py
+```
+
+You can create Windows builds with PyInstaller and UV using the following commands for a single-file executable:
+
+```bash
+uv pip install -e .[build]
+.\build_windows.ps1 -OneFile
+```
+
+Or replace -OneFile with OneDirSfx for an installable MSI (requires WiX Toolset v3.x). Use -WixPath if WiX is not on PATH (for example `-WixPath "C:\\Program Files (x86)\\WiX Toolset v3.11\\bin"`).
+
+## Versioning and changelog
+
+- Version lives in `VERSION` and is embedded into the Windows EXE.
+- Release notes live in `CHANGELOG.md`.
 
 ## Text snipping workflow
 

@@ -8,6 +8,7 @@ import statistics
 import traceback
 from dataclasses import dataclass, asdict
 from pathlib import Path
+import sys
 
 import tkinter as tk
 from tkinter import ttk, filedialog, messagebox
@@ -156,6 +157,30 @@ def ensure_tesseract_configured() -> None:
     2) PATH lookup for 'tesseract'
     3) Common install locations by OS/environment variables
     """
+    # 0) Bundled Tesseract (PyInstaller onefile/onedir)
+    bundle_roots = []
+    meipass = getattr(sys, "_MEIPASS", None)
+    if meipass:
+        bundle_roots.append(Path(meipass))
+    try:
+        bundle_roots.append(Path(sys.executable).parent)
+    except Exception:
+        pass
+
+    for base in bundle_roots:
+        try:
+            tess_root = base / "Tesseract-OCR"
+            tess_exe = tess_root / "tesseract.exe"
+            tess_data = tess_root / "tessdata"
+            if tess_exe.is_file():
+                pytesseract.pytesseract.tesseract_cmd = str(tess_exe)
+                os.environ.setdefault("TESSERACT_CMD", str(tess_exe))
+                if tess_data.is_dir():
+                    os.environ.setdefault("TESSDATA_PREFIX", str(tess_data))
+                return
+        except Exception:
+            pass
+
     # 1) Explicit env var
     env_cmd = os.environ.get("TESSERACT_CMD", "").strip()
     if env_cmd:
@@ -780,6 +805,7 @@ class SnipOCRApp(tk.Tk):
     def __init__(self):
         super().__init__()
         self.title("Data Snipper")
+        self._set_window_icon()
         self.geometry("980x720")
         self._saved_geometry = self.wm_geometry()
         self._dialogs = set()   # Track Toplevel dialogs we create
@@ -787,12 +813,72 @@ class SnipOCRApp(tk.Tk):
         self.active_preset, self.presets = load_config()
 
         self._build_ui()
+        self._ensure_min_width()
 
         try:
             ensure_tesseract_configured()
         except Exception as e:
             messagebox.showerror("Tesseract not configured", str(e))
 
+        self._close_splash_if_present()
+
+    def _set_window_icon(self):
+        self._set_app_user_model_id()
+        ico_path = self._resource_path(os.path.join("images", "snipper-icon.ico"))
+        if ico_path and os.path.isfile(ico_path):
+            try:
+                self.iconbitmap(ico_path)
+            except Exception:
+                pass
+
+        png_path = self._resource_path(os.path.join("images", "snipper-icon.png"))
+        if png_path and os.path.isfile(png_path):
+            try:
+                img = Image.open(png_path)
+                self._icon_image = ImageTk.PhotoImage(img)
+                self.iconphoto(True, self._icon_image)
+            except Exception:
+                pass
+
+    @staticmethod
+    def _set_app_user_model_id():
+        if platform.system().lower() != "windows":
+            return
+        try:
+            ctypes.windll.shell32.SetCurrentProcessExplicitAppUserModelID("DataSnipper")
+        except Exception:
+            pass
+
+    @staticmethod
+    def _resource_path(rel_path: str) -> str:
+        candidates = []
+        meipass = getattr(sys, "_MEIPASS", None)
+        if meipass:
+            candidates.append(Path(meipass))
+        try:
+            exe_dir = Path(sys.executable).parent
+            candidates.append(exe_dir)
+            candidates.append(exe_dir / "_internal")
+        except Exception:
+            pass
+        candidates.append(Path(os.path.abspath(os.path.dirname(__file__))))
+
+        for base in candidates:
+            try:
+                candidate = base / rel_path
+                if candidate.is_file():
+                    return str(candidate)
+            except Exception:
+                pass
+        return os.path.join(str(candidates[-1]), rel_path)
+
+    @staticmethod
+    def _close_splash_if_present():
+        try:
+            import pyi_splash  # type: ignore
+            pyi_splash.close()
+        except Exception:
+            pass
 
     def register_dialog(self, win: tk.Toplevel) -> None:
         self._dialogs.add(win)
@@ -801,6 +887,15 @@ class SnipOCRApp(tk.Tk):
         if False:
             # Also handle user closing via window manager
             win.protocol("WM_DELETE_WINDOW", lambda w=win: self._safe_destroy(w))
+
+    def _ensure_min_width(self):
+        self.update_idletasks()
+        req_w = self.winfo_reqwidth()
+        cur_w = self.winfo_width()
+        cur_h = self.winfo_height()
+        min_w = max(cur_w, req_w + 24)
+        if min_w > cur_w:
+            self.geometry(f"{min_w}x{cur_h}")
 
     def _safe_destroy(self, w: tk.Toplevel) -> None:
         try:

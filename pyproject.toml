@@ -1,0 +1,15 @@
+[project]
+name = "data-snipper"
+version = "0.1.0"
+description = "GUI tool for OCR notepad and chart digitization."
+requires-python = ">=3.10"
+dependencies = [
+    "mss",
+    "numpy",
+    "opencv-python",
+    "pillow",
+    "pytesseract",
+]
+
+[project.optional-dependencies]
+build = ["pyinstaller"]
