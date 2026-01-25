@@ -649,11 +649,13 @@ def extract_scatter_series(
     tol: int,
     *,
     seed_px: Optional[Tuple[int,int]] = None,
+    seed_bbox_px: Optional[Tuple[int,int,int,int]] = None,
     template_radius_px: int = 12,
     min_area_px: int = 6,
     split_overlaps: bool = True,
     shape_filter: bool = True,
     shape_match_thresh: float = 0.30,
+    template_match_thresh: float = 0.6,
 ) -> List[Tuple[int,int]]:
     """
     Extract scatter points inside ROI using a color mask, with optional overlap-splitting and
@@ -686,15 +688,35 @@ def extract_scatter_series(
 
     # ---------------- Seed template (optional) ----------------
     tmpl_contour = None
-    if seed_px is not None:
-        sx, sy = seed_px
-        if (x0 <= sx < x1) and (y0 <= sy < y1):
-            sxl, syl = int(sx - x0), int(sy - y0)
-            r = int(max(4, template_radius_px))
-            xl = max(0, sxl - r); xr = min(W, sxl + r + 1)
-            yl = max(0, syl - r); yr = min(H, syl + r + 1)
+    if seed_bbox_px is not None or seed_px is not None:
+        if seed_bbox_px is not None:
+            bx0, by0, bx1, by1 = seed_bbox_px
+            xl = max(0, min(int(bx0 - x0), W))
+            xr = max(0, min(int(bx1 - x0), W))
+            yl = max(0, min(int(by0 - y0), H))
+            yr = max(0, min(int(by1 - y0), H))
+        else:
+            sx, sy = seed_px if seed_px is not None else (None, None)
+            if sx is None or sy is None or not ((x0 <= sx < x1) and (y0 <= sy < y1)):
+                sx = None
+            if sx is not None:
+                sxl, syl = int(sx - x0), int(sy - y0)
+                r = int(max(4, template_radius_px))
+                xl = max(0, sxl - r); xr = min(W, sxl + r + 1)
+                yl = max(0, syl - r); yr = min(H, syl + r + 1)
+            else:
+                xl = xr = yl = yr = 0
+
+        if xr > xl and yr > yl:
             win = mask[yl:yr, xl:xr]
             if win.size:
+                nz = np.argwhere(win > 0)
+                if nz.size:
+                    y_min = int(nz[:, 0].min())
+                    y_max = int(nz[:, 0].max())
+                    x_min = int(nz[:, 1].min())
+                    x_max = int(nz[:, 1].max())
+                    win = win[y_min:y_max+1, x_min:x_max+1]
                 # Keep the largest connected component in the window (seed marker should dominate).
                 nlab, labs, stats, _ = cv2.connectedComponentsWithStats((win > 0).astype(np.uint8), connectivity=8)
                 if nlab > 1:
@@ -750,6 +772,47 @@ def extract_scatter_series(
             return True
         return score <= float(shape_match_thresh)
 
+    if seed_bbox_px is not None:
+        tmpl = None
+        if seed_bbox_px is not None:
+            bx0, by0, bx1, by1 = seed_bbox_px
+            xl = max(0, min(int(bx0 - x0), W))
+            xr = max(0, min(int(bx1 - x0), W))
+            yl = max(0, min(int(by0 - y0), H))
+            yr = max(0, min(int(by1 - y0), H))
+            if xr > xl and yr > yl:
+                win = mask[yl:yr, xl:xr]
+                if win.size:
+                    nz = np.argwhere(win > 0)
+                    if nz.size:
+                        y_min = int(nz[:, 0].min())
+                        y_max = int(nz[:, 0].max())
+                        x_min = int(nz[:, 1].min())
+                        x_max = int(nz[:, 1].max())
+                        tmpl = win[y_min:y_max+1, x_min:x_max+1]
+
+        if tmpl is not None and tmpl.shape[0] > 1 and tmpl.shape[1] > 1:
+            tmpl_f = tmpl.astype(np.float32)
+            src_f = mask.astype(np.float32)
+            res = cv2.matchTemplate(src_f, tmpl_f, cv2.TM_CCOEFF_NORMED)
+            ys, xs = np.where(res >= float(template_match_thresh))
+            if ys.size:
+                scores = res[ys, xs]
+                order = np.argsort(scores)[::-1]
+                min_dist = max(2, int(round(min(tmpl.shape[0], tmpl.shape[1]) / 2.0)))
+                kept: List[Tuple[int, int]] = []
+                for idx in order:
+                    x = int(xs[idx])
+                    y = int(ys[idx])
+                    cx = x + int(round(tmpl.shape[1] / 2.0))
+                    cy = y + int(round(tmpl.shape[0] / 2.0))
+                    if any((abs(cx - kx) <= min_dist and abs(cy - ky) <= min_dist) for (kx, ky) in kept):
+                        continue
+                    kept.append((cx, cy))
+                pts = [(x0 + kx, y0 + ky) for (kx, ky) in kept]
+                pts.sort(key=lambda p: (p[0], p[1]))
+                return pts
+
     if labels is not None:
         # Parse watershed labels (2..)
         for lab in range(2, int(labels.max()) + 1):
@@ -791,6 +854,151 @@ def extract_scatter_series(
     # Stable order: by x then y
     pts.sort(key=lambda p: (p[0], p[1]))
     return pts
+
+def extract_scatter_series_fixed_stride(
+    bgr: np.ndarray,
+    roi: Tuple[int,int,int,int],
+    target_bgr: Tuple[int,int,int],
+    tol: int,
+    *,
+    mode: str,
+    grid_px: Sequence[int],
+    band_px: Optional[int] = None,
+    seed_px: Optional[Tuple[int,int]] = None,
+    seed_bbox_px: Optional[Tuple[int,int,int,int]] = None,
+    template_match_thresh: float = 0.6,
+) -> List[Optional[int]]:
+    """
+    Fixed-stride scatter sampling.
+    - mode="fixed_x": grid_px is xpx positions; returns ypx per x (or None).
+    - mode="fixed_y": grid_px is ypx positions; returns xpx per y (or None).
+    """
+    x0, y0, x1, y1 = roi
+    if band_px is None:
+        if len(grid_px) >= 2:
+            diffs = [abs(int(grid_px[i + 1]) - int(grid_px[i])) for i in range(len(grid_px) - 1)]
+            diffs = [d for d in diffs if d > 0]
+            min_step = min(diffs) if diffs else 4
+        else:
+            min_step = 4
+        band_px = max(1, int(round(min_step / 2.0)))
+
+    require_cv2()
+    import cv2
+
+    x0, y0, x1, y1 = roi
+    roi_img = bgr[y0:y1, x0:x1]
+    mask = color_distance_mask(roi_img, target_bgr, tol).astype(np.uint8) * 255
+
+    tmpl = None
+    if seed_bbox_px is not None:
+        bx0, by0, bx1, by1 = seed_bbox_px
+        xl = max(0, min(int(bx0 - x0), mask.shape[1]))
+        xr = max(0, min(int(bx1 - x0), mask.shape[1]))
+        yl = max(0, min(int(by0 - y0), mask.shape[0]))
+        yr = max(0, min(int(by1 - y0), mask.shape[0]))
+        if xr > xl and yr > yl:
+            win = mask[yl:yr, xl:xr]
+            nz = np.argwhere(win > 0)
+            if nz.size:
+                y_min = int(nz[:, 0].min())
+                y_max = int(nz[:, 0].max())
+                x_min = int(nz[:, 1].min())
+                x_max = int(nz[:, 1].max())
+                tmpl = win[y_min:y_max+1, x_min:x_max+1].astype(np.uint8)
+
+    H, W = mask.shape[:2]
+    if tmpl is None or tmpl.size == 0:
+        pts = extract_scatter_series(
+            bgr,
+            roi,
+            target_bgr,
+            tol,
+            seed_px=seed_px,
+            seed_bbox_px=seed_bbox_px,
+            template_match_thresh=template_match_thresh,
+        )
+        results: List[Optional[int]] = []
+        if mode == "fixed_x":
+            for xpx in grid_px:
+                if xpx < x0 or xpx >= x1:
+                    results.append(None)
+                    continue
+                ys = [py for (px, py) in pts if abs(int(px) - int(xpx)) <= int(band_px or 1)]
+                if not ys:
+                    results.append(None)
+                    continue
+                results.append(int(round(float(np.mean(ys)))))
+            return results
+        if mode == "fixed_y":
+            for ypx in grid_px:
+                if ypx < y0 or ypx >= y1:
+                    results.append(None)
+                    continue
+                xs = [px for (px, py) in pts if abs(int(py) - int(ypx)) <= int(band_px or 1)]
+                if not xs:
+                    results.append(None)
+                    continue
+                results.append(int(round(float(np.mean(xs)))))
+            return results
+
+        raise ValueError(f"Unsupported fixed stride mode: {mode}")
+
+    if band_px is None:
+        band_px = max(1, int(round(min(tmpl.shape[0], tmpl.shape[1]) / 2.0)))
+
+    results: List[Optional[int]] = []
+    tmpl_h, tmpl_w = tmpl.shape[:2]
+    min_band = max(1, int(round(min(tmpl_h, tmpl_w) / 3.0)))
+    band_px = max(min_band, int(band_px))
+
+    if mode == "fixed_x":
+        band_px = max(int(band_px), int(round(tmpl_w / 2.0)))
+        for xpx in grid_px:
+            if xpx < x0 or xpx >= x1:
+                results.append(None)
+                continue
+            xc = int(xpx - x0)
+            xl = max(0, xc - int(band_px))
+            xr = min(W - 1, xc + int(band_px))
+            sl = mask[:, xl:(xr + 1)]
+            if sl.shape[1] < tmpl_w or sl.shape[0] < tmpl_h:
+                results.append(None)
+                continue
+            res = cv2.matchTemplate(sl, tmpl, cv2.TM_CCOEFF_NORMED)
+            _, max_val, _, max_loc = cv2.minMaxLoc(res)
+            if float(max_val) < float(template_match_thresh):
+                results.append(None)
+                continue
+            y_loc = int(max_loc[1])
+            cy = y_loc + int(round(tmpl_h / 2.0))
+            results.append(int(round(y0 + cy)))
+        return results
+
+    if mode == "fixed_y":
+        band_px = max(int(band_px), int(round(tmpl_h / 2.0)))
+        for ypx in grid_px:
+            if ypx < y0 or ypx >= y1:
+                results.append(None)
+                continue
+            yc = int(ypx - y0)
+            yl = max(0, yc - int(band_px))
+            yr = min(H - 1, yc + int(band_px))
+            sl = mask[yl:(yr + 1), :]
+            if sl.shape[1] < tmpl_w or sl.shape[0] < tmpl_h:
+                results.append(None)
+                continue
+            res = cv2.matchTemplate(sl, tmpl, cv2.TM_CCOEFF_NORMED)
+            _, max_val, _, max_loc = cv2.minMaxLoc(res)
+            if float(max_val) < float(template_match_thresh):
+                results.append(None)
+                continue
+            x_loc = int(max_loc[0])
+            cx = x_loc + int(round(tmpl_w / 2.0))
+            results.append(int(round(x0 + cx)))
+        return results
+
+    raise ValueError(f"Unsupported fixed stride mode: {mode}")
 def build_x_grid(xmin: float, xmax: float, step: float) -> List[float]:
     if step <= 0:
         raise ValueError("x_step must be > 0")

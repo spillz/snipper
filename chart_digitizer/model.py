@@ -26,6 +26,8 @@ class SeriesCalibration:
     x_step_unit: str
     y_step: float
     y_step_unit: str
+    sample_mode: str
+    scatter_match_thresh: float
 
 
 @dataclass
@@ -58,6 +60,10 @@ class Series:
 
     # Optional seed pixel (set when user clicks the chart)
     seed_px: Optional[Tuple[int, int]] = None
+    # Optional bbox (x0,y0,x1,y1) in image px for scatter template
+    seed_bbox_px: Optional[Tuple[int, int, int, int]] = None
+    # Optional marker bounds (x0,y0,x1,y1) in image px for scatter overlay
+    seed_marker_bbox_px: Optional[Tuple[int, int, int, int]] = None
     # Optional extra seed pixels for improved tracking (Ctrl+click)
     extra_seeds_px: List[Tuple[int, int]] = field(default_factory=list)
 

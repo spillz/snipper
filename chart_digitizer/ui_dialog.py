@@ -18,7 +18,7 @@ from .model import ChartState, Series, SeriesCalibration
 from .calibration import AxisScale, AxisCalibration, ChartCalibration
 from .extract import (
     build_x_grid, build_x_grid_aligned,
-    extract_line_series, extract_scatter_series, enforce_line_grid,
+    extract_line_series, extract_scatter_series, extract_scatter_series_fixed_stride, enforce_line_grid,
     detect_runs_centers_along_x, detect_runs_centers_along_y,
 )
 from .export_csv import wide_csv_string, long_csv_string, write_wide_csv, write_long_csv
@@ -69,6 +69,8 @@ class ChartDigitizerDialog(tk.Toplevel):
         self.var_y_step = tk.DoubleVar(value=1.0)
         self.var_y_step_unit = tk.StringVar(value="days")
         self.var_tol = tk.IntVar(value=20)
+        self.var_sample_mode = tk.StringVar(value="Free")
+        self.var_scatter_match_thresh = tk.DoubleVar(value=0.6)
 
         self._date_unit_user_set = False
         self._date_unit_auto: Optional[str] = None
@@ -81,6 +83,9 @@ class ChartDigitizerDialog(tk.Toplevel):
         self._toggle_seen: set[int] = set()
         self._edit_radius = 8
         self._suppress_series_mode_change = False
+        self._scatter_rb_start: Optional[Tuple[int, int]] = None
+        self._scatter_rb_id: Optional[int] = None
+        self._scatter_rb_active: bool = False
 
         # axis click staging
         self._pending_axis: Optional[str] = None  # 'x0','x1','y0','y1' progress
@@ -148,6 +153,9 @@ class ChartDigitizerDialog(tk.Toplevel):
         self.canvas.bind("<Button-1>", self._on_click)
         self.canvas.bind("<B1-Motion>", self._on_drag)
         self.canvas.bind("<ButtonRelease-1>", self._on_release)
+        self.canvas.bind("<Shift-ButtonPress-1>", self._on_scatter_rubberband_press)
+        self.canvas.bind("<Shift-B1-Motion>", self._on_scatter_rubberband_motion)
+        self.canvas.bind("<Shift-ButtonRelease-1>", self._on_scatter_rubberband_release)
         self.canvas.bind("<Motion>", self._on_motion)
         self.canvas.bind("<Button-3>", self._on_right_click)
         self.canvas.bind("<Control-ButtonPress-1>", self._on_ctrl_toggle_press)
@@ -163,6 +171,16 @@ class ChartDigitizerDialog(tk.Toplevel):
 
         self.axis_px_values = tk.StringVar(value="")
         ttk.Label(ax, textvariable=self.axis_px_values).pack(fill="x", pady=(2, 0))
+
+        sample_row = ttk.Frame(ax)
+        sample_row.pack(fill="x", pady=(6, 0))
+        ttk.Label(sample_row, text="Sample:").pack(side="left")
+        self.cmb_sample_mode = ttk.Combobox(
+            sample_row, textvariable=self.var_sample_mode, state="readonly", width=10,
+            values=("Free", "Fixed X", "Fixed Y")
+        )
+        self.cmb_sample_mode.pack(side="left", padx=(6, 0))
+        self.cmb_sample_mode.bind("<<ComboboxSelected>>", lambda _e: self._on_sample_mode_change())
 
         grid = ttk.Frame(ax)
         grid.pack(fill="x")
@@ -277,6 +295,10 @@ class ChartDigitizerDialog(tk.Toplevel):
         row.pack(fill="x")
         ttk.Label(row, text="Color tol:").pack(side="left")
         ttk.Entry(row, textvariable=self.var_tol, width=6).pack(side="left", padx=(6,0))
+        match_row = ttk.Frame(ext)
+        match_row.pack(fill="x", pady=(6,0))
+        ttk.Label(match_row, text="Match thresh:").pack(side="left")
+        ttk.Entry(match_row, textvariable=self.var_scatter_match_thresh, width=6).pack(side="left", padx=(6,0))
         ttk.Checkbutton(
             ext, text="Span mode (bars/areas)", variable=self.var_prefer_outline,
             command=self._on_series_mode_change
@@ -498,7 +520,9 @@ class ChartDigitizerDialog(tk.Toplevel):
             self.lbl_y_step_units.grid()
             self.cmb_y_step_units.grid()
 
-        show_x_step = (not is_bar) and (self.series_mode.get() != "scatter") and not (is_categorical and cat_axis == "x")
+        sample_mode = self._sample_label_to_mode(self.var_sample_mode.get())
+        scatter_x = (self.series_mode.get() == "scatter" and sample_mode == "fixed_x")
+        show_x_step = ((not is_bar) and (self.series_mode.get() != "scatter") and not (is_categorical and cat_axis == "x")) or scatter_x
         if show_x_step:
             self.lbl_x_step.grid()
             self.ent_x_step.grid()
@@ -518,7 +542,8 @@ class ChartDigitizerDialog(tk.Toplevel):
             self.lbl_x_step_units.grid_remove()
             self.cmb_x_step_units.grid_remove()
 
-        show_y_step = is_bar and not (is_categorical and cat_axis == "y")
+        scatter_y = (self.series_mode.get() == "scatter" and sample_mode == "fixed_y")
+        show_y_step = (is_bar and not (is_categorical and cat_axis == "y")) or scatter_y
         if show_y_step:
             self.lbl_y_step.grid()
             self.ent_y_step.grid()
@@ -647,6 +672,8 @@ class ChartDigitizerDialog(tk.Toplevel):
         x_step_unit = (self.var_x_step_unit.get() or "").strip().lower()
         y_step = float(self.var_y_step.get())
         y_step_unit = (self.var_y_step_unit.get() or "").strip().lower()
+        sample_mode = self._sample_label_to_mode(self.var_sample_mode.get())
+        scatter_match_thresh = float(self.var_scatter_match_thresh.get())
         return (
             roi,
             x_axis_px,
@@ -663,6 +690,8 @@ class ChartDigitizerDialog(tk.Toplevel):
             x_step_unit,
             y_step,
             y_step_unit,
+            sample_mode,
+            scatter_match_thresh,
         )
 
     def _calibration_key_from_series(self, s: Series) -> tuple:
@@ -683,6 +712,8 @@ class ChartDigitizerDialog(tk.Toplevel):
             cal.x_step_unit,
             cal.y_step,
             cal.y_step_unit,
+            cal.sample_mode,
+            cal.scatter_match_thresh,
         )
 
     def _make_series_calibration_from_ui(self) -> SeriesCalibration:
@@ -708,6 +739,8 @@ class ChartDigitizerDialog(tk.Toplevel):
             x_step_unit,
             y_step,
             y_step_unit,
+            sample_mode,
+            scatter_match_thresh,
         ) = key
         return SeriesCalibration(
             name=name,
@@ -726,6 +759,8 @@ class ChartDigitizerDialog(tk.Toplevel):
             x_step_unit=x_step_unit,
             y_step=float(y_step),
             y_step_unit=y_step_unit,
+            sample_mode=sample_mode,
+            scatter_match_thresh=float(scatter_match_thresh),
         )
 
     def _apply_series_calibration_to_ui(self, cal: SeriesCalibration) -> None:
@@ -744,8 +779,11 @@ class ChartDigitizerDialog(tk.Toplevel):
         self.var_x_step_unit.set(cal.x_step_unit)
         self.var_y_step.set(float(cal.y_step))
         self.var_y_step_unit.set(cal.y_step_unit)
+        self.var_sample_mode.set(self._sample_mode_to_label(cal.sample_mode))
+        self.var_scatter_match_thresh.set(float(cal.scatter_match_thresh))
         self._date_unit_user_set = True
         self._refresh_scale_ui()
+        self._update_sample_mode_ui()
         self._update_tip()
         self._redraw_overlay()
 
@@ -946,8 +984,8 @@ class ChartDigitizerDialog(tk.Toplevel):
             if series_mode == "scatter":
                 msg = (
                     "Add series (Scatter): Click a marker color to pick the series. "
-                    "The tool detects colored marker blobs inside the region and exports their (x,y) coordinates. "
-                    "X step is ignored in scatter mode."
+                    "Shift+drag draws a template window for matching scatter markers. "
+                    "The tool detects colored marker blobs inside the region and exports their (x,y) coordinates."
                 )
             elif series_mode == "line":
                 msg = (
@@ -1020,8 +1058,52 @@ class ChartDigitizerDialog(tk.Toplevel):
             self.var_prefer_outline.set(True)
         else:
             self.var_prefer_outline.set(False)
+        if self.series_mode.get() == "scatter":
+            self.var_sample_mode.set("Free")
         self._update_tip()
         self._refresh_scale_ui()
+        self._update_sample_mode_ui()
+
+    def _sample_label_to_mode(self, label: str) -> str:
+        label = (label or "").strip().lower()
+        if label == "fixed x":
+            return "fixed_x"
+        if label == "fixed y":
+            return "fixed_y"
+        return "free"
+
+    def _sample_mode_to_label(self, mode: str) -> str:
+        mode = (mode or "").strip().lower()
+        if mode == "fixed_x":
+            return "Fixed X"
+        if mode == "fixed_y":
+            return "Fixed Y"
+        return "Free"
+
+    def _allowed_sample_labels(self, series_mode: str) -> List[str]:
+        if series_mode == "scatter":
+            return ["Free", "Fixed X", "Fixed Y"]
+        if series_mode == "bar":
+            return ["Fixed Y"]
+        return ["Fixed X"]
+
+    def _on_sample_mode_change(self) -> None:
+        self._update_sample_mode_ui()
+        self._refresh_scale_ui()
+
+    def _update_sample_mode_ui(self) -> None:
+        allowed = self._allowed_sample_labels(self.series_mode.get())
+        if self.var_sample_mode.get() not in allowed:
+            self.var_sample_mode.set(allowed[0])
+        self.cmb_sample_mode.configure(values=allowed)
+
+        mode = self._sample_label_to_mode(self.var_sample_mode.get())
+        x_state = "normal" if mode == "fixed_x" else "disabled"
+        y_state = "normal" if mode == "fixed_y" else "disabled"
+        self.ent_x_step.configure(state=x_state)
+        self.cmb_x_step_units.configure(state=("readonly" if x_state == "normal" else "disabled"))
+        self.ent_y_step.configure(state=y_state)
+        self.cmb_y_step_units.configure(state=("readonly" if y_state == "normal" else "disabled"))
 
     def _on_canvas_configure(self, _evt=None):
         # Avoid thrashing when resizing: schedule a single re-render
@@ -1158,6 +1240,8 @@ class ChartDigitizerDialog(tk.Toplevel):
                                                 fill="#666", outline="",
                                                 tags=("overlay","pt",f"pt_{i}"))
             # detection seed markers
+        if self._active_series_id is not None:
+            s = self._get_series(self._active_series_id)
             if s and (s.seed_px or s.extra_seeds_px):
                 seeds = []
                 if s.seed_px:
@@ -1165,14 +1249,26 @@ class ChartDigitizerDialog(tk.Toplevel):
                 for ex in (s.extra_seeds_px or []):
                     seeds.append((ex, "#00E5FF"))
                 for (sx, sy), color in seeds:
-                    cx, cy = self._to_canvas(int(sx), int(sy))
-                    r = 5
-                    self.canvas.create_oval(cx-r, cy-r, cx+r, cy+r,
-                                            outline="black", width=2, fill="",
-                                            tags=("overlay","seed"))
-                    self.canvas.create_oval(cx-(r-1), cy-(r-1), cx+(r-1), cy+(r-1),
-                                            outline=color, width=2, fill="",
-                                            tags=("overlay","seed"))
+                    marker_bbox = getattr(s, "seed_marker_bbox_px", None)
+                    if marker_bbox:
+                        mx0, my0, mx1, my1 = marker_bbox
+                        cx0, cy0 = self._to_canvas(int(mx0), int(my0))
+                        cx1, cy1 = self._to_canvas(int(mx1), int(my1))
+                        self.canvas.create_oval(cx0, cy0, cx1, cy1,
+                                                outline="black", width=2, fill="",
+                                                tags=("overlay","seed"))
+                        self.canvas.create_oval(cx0+1, cy0+1, cx1-1, cy1-1,
+                                                outline=color, width=2, fill="",
+                                                tags=("overlay","seed"))
+                    else:
+                        cx, cy = self._to_canvas(int(sx), int(sy))
+                        r = 5
+                        self.canvas.create_oval(cx-r, cy-r, cx+r, cy+r,
+                                                outline="black", width=2, fill="",
+                                                tags=("overlay","seed"))
+                        self.canvas.create_oval(cx-(r-1), cy-(r-1), cx+(r-1), cy+(r-1),
+                                                outline=color, width=2, fill="",
+                                                tags=("overlay","seed"))
         self._update_axis_pixels_label()
 
     def _update_axis_pixels_label(self) -> None:
@@ -1215,6 +1311,9 @@ class ChartDigitizerDialog(tk.Toplevel):
     def _on_click(self, event):
         if event.state & 0x0004:  # Control held: handled by ctrl bindings
             return
+        if event.state & 0x0001:  # Shift held: handled by shift bindings
+            if self.tool_mode.get() == "addseries" and self.series_mode.get() == "scatter":
+                return
         xpx, ypx = self._to_image_px(event.x, event.y)
         mode = self.tool_mode.get()
 
@@ -1270,6 +1369,8 @@ class ChartDigitizerDialog(tk.Toplevel):
         self._drag_series_mode = getattr(s, "mode", None)
 
     def _on_drag(self, event):
+        if self._scatter_rb_active:
+            return
         xpx, ypx = self._to_image_px(event.x, event.y)
         mode = self.tool_mode.get()
         if mode == "roi" and getattr(self, "_roi_dragging", False):
@@ -1314,15 +1415,31 @@ class ChartDigitizerDialog(tk.Toplevel):
                 s.points[self._drag_idx] = (float(cat), float(x_data))
 
             else:  # scatter
-                s.px_points[self._drag_idx] = (xpx, ypx)
-                x_data = cal.x_px_to_data(xpx)
-                y_data = cal.y_px_to_data(ypx)
-                s.points[self._drag_idx] = (float(x_data), float(y_data))
+                sample_mode = getattr(s.calibration, "sample_mode", "free")
+                if sample_mode == "fixed_x":
+                    x_fixed = s.px_points[self._drag_idx][0]
+                    x_data = s.points[self._drag_idx][0]
+                    s.px_points[self._drag_idx] = (x_fixed, ypx)
+                    y_data = cal.y_px_to_data(ypx)
+                    s.points[self._drag_idx] = (float(x_data), float(y_data))
+                elif sample_mode == "fixed_y":
+                    y_fixed = s.px_points[self._drag_idx][1]
+                    y_data = s.points[self._drag_idx][1]
+                    s.px_points[self._drag_idx] = (xpx, y_fixed)
+                    x_data = cal.x_px_to_data(xpx)
+                    s.points[self._drag_idx] = (float(x_data), float(y_data))
+                else:
+                    s.px_points[self._drag_idx] = (xpx, ypx)
+                    x_data = cal.x_px_to_data(xpx)
+                    y_data = cal.y_px_to_data(ypx)
+                    s.points[self._drag_idx] = (float(x_data), float(y_data))
 
             self._update_tree_row(s)
             self._redraw_overlay()
             self._draw_loupe(xpx, ypx)
     def _on_release(self, event):
+        if self._scatter_rb_active:
+            return
         if self.tool_mode.get() == "roi":
             self._roi_dragging = False
 
@@ -1342,6 +1459,48 @@ class ChartDigitizerDialog(tk.Toplevel):
         self._drag_series_mode = None
         self._toggle_dragging = False
         self._toggle_seen.clear()
+
+    def _on_scatter_rubberband_press(self, event):
+        if self.tool_mode.get() != "addseries" or self.series_mode.get() != "scatter":
+            return
+        xpx, ypx = self._to_image_px(event.x, event.y)
+        self._scatter_rb_start = (xpx, ypx)
+        self._scatter_rb_active = True
+        cx, cy = self._to_canvas(xpx, ypx)
+        self._scatter_rb_id = self.canvas.create_rectangle(
+            cx, cy, cx, cy, outline="#FFD166", width=1, tags=("overlay", "scatter_rb")
+        )
+
+    def _on_scatter_rubberband_motion(self, event):
+        if not self._scatter_rb_active or self._scatter_rb_start is None:
+            return
+        xpx, ypx = self._to_image_px(event.x, event.y)
+        sx, sy = self._scatter_rb_start
+        x0 = min(sx, xpx); x1 = max(sx, xpx)
+        y0 = min(sy, ypx); y1 = max(sy, ypx)
+        cx0, cy0 = self._to_canvas(x0, y0)
+        cx1, cy1 = self._to_canvas(x1, y1)
+        if self._scatter_rb_id is not None:
+            self.canvas.coords(self._scatter_rb_id, cx0, cy0, cx1, cy1)
+
+    def _on_scatter_rubberband_release(self, event):
+        if not self._scatter_rb_active or self._scatter_rb_start is None:
+            return
+        xpx, ypx = self._to_image_px(event.x, event.y)
+        sx, sy = self._scatter_rb_start
+        x0 = min(sx, xpx); x1 = max(sx, xpx)
+        y0 = min(sy, ypx); y1 = max(sy, ypx)
+        self._scatter_rb_active = False
+        self._scatter_rb_start = None
+        if self._scatter_rb_id is not None:
+            self.canvas.delete(self._scatter_rb_id)
+            self._scatter_rb_id = None
+
+        if (x1 - x0) < 3 or (y1 - y0) < 3:
+            self._add_series_from_click(xpx, ypx)
+            return
+
+        self._add_scatter_series_from_bbox((x0, y0, x1, y1))
     def _on_right_click(self, event):
         # Edit-series helpers:
         # - Right-click on point: toggle enabled/NA state
@@ -1497,12 +1656,43 @@ class ChartDigitizerDialog(tk.Toplevel):
 
     # ---------- Series management ----------
     def _add_series_from_click(self, xpx: int, ypx: int):
+        self._add_series_from_seed(xpx, ypx, seed_bbox_px=None)
+
+    def _add_scatter_series_from_bbox(self, bbox: Tuple[int, int, int, int]):
+        x0, y0, x1, y1 = bbox
+        cx = int(round((x0 + x1) / 2.0))
+        cy = int(round((y0 + y1) / 2.0))
+        self._add_series_from_seed(cx, cy, seed_bbox_px=bbox)
+
+    def _add_series_from_seed(self, xpx: int, ypx: int, *, seed_bbox_px: Optional[Tuple[int, int, int, int]]):
         require_cv2()
+        if seed_bbox_px is not None:
+            bx0, by0, bx1, by1 = seed_bbox_px
+            bx0 = max(0, min(self._iw - 1, int(bx0)))
+            bx1 = max(0, min(self._iw - 1, int(bx1)))
+            by0 = max(0, min(self._ih - 1, int(by0)))
+            by1 = max(0, min(self._ih - 1, int(by1)))
+            if bx1 < bx0:
+                bx0, bx1 = bx1, bx0
+            if by1 < by0:
+                by0, by1 = by1, by0
+            patch = self._bgr[by0:by1+1, bx0:bx1+1, :]
+            if patch.size:
+                flat = patch.reshape(-1, 3).astype(np.float32)
+                med = np.median(flat, axis=0)
+                d = np.linalg.norm(flat - med, axis=1)
+                idx = int(np.argmax(d))
+                b, g, r = flat[idx].tolist()
+                target = (int(b), int(g), int(r))
+            else:
+                b, g, r = self._bgr[ypx, xpx].tolist()
+                target = (int(b), int(g), int(r))
+                patch = self._bgr[max(0,ypx-3):ypx+4, max(0,xpx-3):xpx+4, :]
+        else:
+            b, g, r = self._bgr[ypx, xpx].tolist()
+            target = (int(b), int(g), int(r))
+            patch = self._bgr[max(0,ypx-3):ypx+4, max(0,xpx-3):xpx+4, :]
 
-        b, g, r = self._bgr[ypx, xpx].tolist()
-        target = (int(b), int(g), int(r))
-
-        patch = self._bgr[max(0,ypx-3):ypx+4, max(0,xpx-3):xpx+4, :]
         print("picked BGR:", target, "patch median:", np.median(patch.reshape(-1,3), axis=0))
 
         sid = self._next_series_id
@@ -1523,6 +1713,22 @@ class ChartDigitizerDialog(tk.Toplevel):
             calibration=calibration,
         )
         s.seed_px = (xpx, ypx)
+        if seed_bbox_px is not None:
+            s.seed_bbox_px = seed_bbox_px
+            tol = int(self.var_tol.get())
+            mask = color_distance_mask(patch, target, tol).astype(np.uint8)
+            nz = np.argwhere(mask > 0)
+            if nz.size:
+                y_min = int(nz[:, 0].min())
+                y_max = int(nz[:, 0].max())
+                x_min = int(nz[:, 1].min())
+                x_max = int(nz[:, 1].max())
+                s.seed_marker_bbox_px = (
+                    int(bx0 + x_min),
+                    int(by0 + y_min),
+                    int(bx0 + x_max),
+                    int(by0 + y_max),
+                )
         self.series.append(s)
         self._insert_tree_row(s)
 
@@ -1557,12 +1763,152 @@ class ChartDigitizerDialog(tk.Toplevel):
 
         # ---------------- Scatter ----------------
         if kind == "scatter":
-            pts_px = extract_scatter_series(self._bgr, roi, s.color_bgr, tol, seed_px=s.seed_px)
-            s.px_points = pts_px
-            s.points = [(float(cal.x_px_to_data(x)), float(cal.y_px_to_data(y))) for (x, y) in pts_px]
-            s.point_enabled = [True] * len(s.points)
-            self._update_tree_row(s)
-            return
+            sample_mode = getattr(s.calibration, "sample_mode", "free")
+            if sample_mode == "free":
+                pts_px = extract_scatter_series(
+                    self._bgr,
+                    roi,
+                    s.color_bgr,
+                    tol,
+                    seed_px=s.seed_px,
+                    seed_bbox_px=s.seed_bbox_px,
+                    template_match_thresh=float(s.calibration.scatter_match_thresh),
+                )
+                s.px_points = pts_px
+                s.points = [(float(cal.x_px_to_data(x)), float(cal.y_px_to_data(y))) for (x, y) in pts_px]
+                s.point_enabled = [True] * len(s.points)
+                self._update_tree_row(s)
+                return
+
+            if sample_mode == "fixed_x":
+                x0_val = self._require_value(s.calibration.x0_val, "x0", cal=s.calibration)
+                roi_xmin_px, _, roi_xmax_px, _ = roi
+                xmin = float(cal.x_px_to_data(roi_xmin_px))
+                xmax = float(cal.x_px_to_data(roi_xmax_px))
+                if xmin > xmax:
+                    xmin, xmax = xmax, xmin
+
+                step = float(s.calibration.x_step)
+                x_grid: List[float] = []
+                xpx_grid: List[int] = []
+                if s.calibration.x_scale == AxisScale.CATEGORICAL.value:
+                    labels = self._parse_categories(s.calibration.categories)
+                    if labels:
+                        centers = self._category_centers_px(len(labels), axis="x", axis_px=s.calibration.x_axis_px)
+                        xpx_grid = [int(round(p)) for p in centers]
+                        x_grid = [float(i + 1) for i in range(len(labels))]
+                if not x_grid:
+                    if s.calibration.x_scale == AxisScale.DATE.value:
+                        x_grid = self._build_date_grid_aligned(
+                            xmin, xmax, step, s.calibration.x_step_unit, anchor=x0_val
+                        )
+                    else:
+                        x_grid = build_x_grid_aligned(xmin, xmax, step, anchor=x0_val)
+                    xpx_grid = [int(round(cal.x_data_to_px(x))) for x in x_grid]
+
+                ypx_raw = extract_scatter_series_fixed_stride(
+                    self._bgr,
+                    roi,
+                    s.color_bgr,
+                    tol,
+                    mode="fixed_x",
+                    grid_px=xpx_grid,
+                    seed_px=s.seed_px,
+                    seed_bbox_px=s.seed_bbox_px,
+                    template_match_thresh=float(s.calibration.scatter_match_thresh),
+                )
+
+                y_data_raw: List[Optional[float]] = []
+                for ypx in ypx_raw:
+                    y_data_raw.append(None if ypx is None else float(cal.y_px_to_data(int(ypx))))
+
+                y0_val = self._require_value(s.calibration.y0_val, "y0", cal=s.calibration)
+                y1_val = self._require_value(s.calibration.y1_val, "y1", cal=s.calibration)
+                fallback_y = 0.5 * (y0_val + y1_val)
+                y_filled = enforce_line_grid(list(x_grid), y_data_raw, fallback_y=fallback_y)
+
+                px_points: List[Tuple[int, int]] = []
+                enabled: List[bool] = []
+                for i, xpx in enumerate(xpx_grid):
+                    if ypx_raw[i] is None:
+                        ypx = int(round(cal.y_data_to_px(y_filled[i])))
+                        enabled.append(False)
+                    else:
+                        ypx = int(ypx_raw[i])
+                        enabled.append(True)
+                    px_points.append((int(xpx), int(ypx)))
+
+                s.px_points = px_points
+                s.points = [(float(x_grid[i]), float(y_filled[i])) for i in range(len(x_grid))]
+                s.point_enabled = enabled
+                self._update_tree_row(s)
+                return
+
+            if sample_mode == "fixed_y":
+                y0_val = self._require_value(s.calibration.y0_val, "y0", cal=s.calibration)
+                roi_ymin_px, roi_ymax_px = roi[1], roi[3]
+                ymin = float(cal.y_px_to_data(roi_ymin_px))
+                ymax = float(cal.y_px_to_data(roi_ymax_px))
+                if ymin > ymax:
+                    ymin, ymax = ymax, ymin
+
+                step = float(s.calibration.y_step)
+                y_grid: List[float] = []
+                ypx_grid: List[int] = []
+                if s.calibration.y_scale == AxisScale.CATEGORICAL.value:
+                    labels = self._parse_categories(s.calibration.categories)
+                    if labels:
+                        centers = self._category_centers_px(len(labels), axis="y", axis_px=s.calibration.y_axis_px)
+                        ypx_grid = [int(round(p)) for p in centers]
+                        y_grid = [float(i + 1) for i in range(len(labels))]
+                if not y_grid:
+                    if s.calibration.y_scale == AxisScale.DATE.value:
+                        y_grid = self._build_date_grid_aligned(
+                            ymin, ymax, step, s.calibration.y_step_unit, anchor=y0_val
+                        )
+                    else:
+                        y_grid = build_x_grid_aligned(ymin, ymax, step, anchor=y0_val)
+                    ypx_grid = [int(round(cal.y_data_to_px(y))) for y in y_grid]
+
+                xpx_raw = extract_scatter_series_fixed_stride(
+                    self._bgr,
+                    roi,
+                    s.color_bgr,
+                    tol,
+                    mode="fixed_y",
+                    grid_px=ypx_grid,
+                    seed_px=s.seed_px,
+                    seed_bbox_px=s.seed_bbox_px,
+                    template_match_thresh=float(s.calibration.scatter_match_thresh),
+                )
+
+                x_data_raw: List[Optional[float]] = []
+                for xpx in xpx_raw:
+                    x_data_raw.append(None if xpx is None else float(cal.x_px_to_data(int(xpx))))
+
+                x0_val = self._require_value(s.calibration.x0_val, "x0", cal=s.calibration)
+                x1_val = self._require_value(s.calibration.x1_val, "x1", cal=s.calibration)
+                fallback_x = 0.5 * (x0_val + x1_val)
+                x_filled = enforce_line_grid(list(y_grid), x_data_raw, fallback_y=fallback_x)
+
+                px_points = []
+                enabled = []
+                for i, ypx in enumerate(ypx_grid):
+                    if xpx_raw[i] is None:
+                        xpx = int(round(cal.x_data_to_px(x_filled[i])))
+                        enabled.append(False)
+                    else:
+                        xpx = int(xpx_raw[i])
+                        enabled.append(True)
+                    px_points.append((int(xpx), int(ypx)))
+
+                s.px_points = px_points
+                s.points = [(float(x_filled[i]), float(y_grid[i])) for i in range(len(y_grid))]
+                s.point_enabled = enabled
+                self._update_tree_row(s)
+                return
+
+            raise ValueError(f"Unsupported scatter sample mode: {sample_mode}")
 
         # Helper: build a uint8 mask for this series inside ROI
         require_cv2()
