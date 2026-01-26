@@ -14,8 +14,9 @@ from PIL import Image, ImageTk
 from datetime import datetime, timezone
 
 from .cv_utils import require_cv2, pil_to_bgr, color_distance_mask
-from .model import ChartState, Series, SeriesCalibration
-from .calibration import AxisScale, AxisCalibration, ChartCalibration
+from .data_model import Series, CalibrationConfig
+from .ui_state import CalibrationOverlayState
+from .calibration import AxisScale, AxisCalibration, Calibration
 from .extract import (
     build_x_grid, build_x_grid_aligned,
     extract_line_series, extract_scatter_series, extract_scatter_series_fixed_stride, enforce_line_grid,
@@ -38,7 +39,7 @@ class ChartDigitizerDialog(tk.Toplevel):
         self._bgr = pil_to_bgr(self._pil)
         self._iw, self._ih = self._pil.size
 
-        self.state = ChartState(xmin_px=0, ymin_px=0, xmax_px=self._iw, ymax_px=self._ih)
+        self.state = CalibrationOverlayState(xmin_px=0, ymin_px=0, xmax_px=self._iw, ymax_px=self._ih)
         self.series: List[Series] = []
         self._next_series_id = 1
         self._calibration_names: dict[tuple, str] = {}
@@ -519,7 +520,7 @@ class ChartDigitizerDialog(tk.Toplevel):
             return "categorical" if self.y_scale.get() == AxisScale.CATEGORICAL.value else "continuous"
         return "categorical" if self.x_scale.get() == AxisScale.CATEGORICAL.value else "continuous"
 
-    def _stride_mode_for_calibration(self, cal: SeriesCalibration, chart_kind: str) -> str:
+    def _stride_mode_for_calibration(self, cal: CalibrationConfig, chart_kind: str) -> str:
         if chart_kind == "bar":
             return "categorical" if cal.y_scale == AxisScale.CATEGORICAL.value else "continuous"
         return "categorical" if cal.x_scale == AxisScale.CATEGORICAL.value else "continuous"
@@ -620,7 +621,7 @@ class ChartDigitizerDialog(tk.Toplevel):
 
         if is_categorical:
             if cat_axis == "y":
-                self.lbl_categories.configure(text="Categories (Y)")
+                self.lbl_categories.configure(text="Categories")
                 self.lbl_y0.grid_remove()
                 self.ent_y0.grid_remove()
                 self.lbl_y1.grid_remove()
@@ -634,7 +635,7 @@ class ChartDigitizerDialog(tk.Toplevel):
                 self.lbl_x1.grid()
                 self.ent_x1.grid()
             else:
-                self.lbl_categories.configure(text="Categories (X)")
+                self.lbl_categories.configure(text="Categories")
                 self.lbl_x0.grid_remove()
                 self.ent_x0.grid_remove()
                 self.lbl_x1.grid_remove()
@@ -873,7 +874,7 @@ class ChartDigitizerDialog(tk.Toplevel):
             cal.sample_mode,
         )
 
-    def _make_series_calibration_from_ui(self) -> SeriesCalibration:
+    def _make_series_calibration_from_ui(self) -> CalibrationConfig:
         key = self._calibration_key_from_ui()
         name = self._calibration_names.get(key)
         if name is None:
@@ -898,7 +899,7 @@ class ChartDigitizerDialog(tk.Toplevel):
             y_step_unit,
             sample_mode,
         ) = key
-        return SeriesCalibration(
+        return CalibrationConfig(
             name=name,
             roi_px=roi,
             x_axis_px=x_axis_px,
@@ -918,7 +919,7 @@ class ChartDigitizerDialog(tk.Toplevel):
             sample_mode=sample_mode,
         )
 
-    def _apply_series_calibration_to_ui(self, cal: SeriesCalibration) -> None:
+    def _apply_series_calibration_to_ui(self, cal: CalibrationConfig) -> None:
         self.state.xmin_px, self.state.ymin_px, self.state.xmax_px, self.state.ymax_px = cal.roi_px
         self.state.x0_px, self.state.x1_px = cal.x_axis_px
         self.state.y0_px, self.state.y1_px = cal.y_axis_px
@@ -956,7 +957,7 @@ class ChartDigitizerDialog(tk.Toplevel):
         self.series_mode.set(kind)
         self.var_stacked.set(bool(getattr(s, "stacked", False)))
 
-    def _pixel_bounds_changes(self, old: SeriesCalibration, new: SeriesCalibration) -> List[str]:
+    def _pixel_bounds_changes(self, old: CalibrationConfig, new: CalibrationConfig) -> List[str]:
         changes: List[str] = []
         if old.roi_px != new.roi_px:
             changes.append("ROI")
@@ -2997,7 +2998,7 @@ class ChartDigitizerDialog(tk.Toplevel):
         raise ValueError(f"Unsupported chart kind: {kind}")
 
 
-    def _require_value(self, s: str, label: str, *, cal: Optional[SeriesCalibration] = None) -> float:
+    def _require_value(self, s: str, label: str, *, cal: Optional[CalibrationConfig] = None) -> float:
         s = (s or "").strip()
         if not s:
             raise ValueError(f"Missing {label} value. Enter it in the Calibration panel.")
@@ -3008,7 +3009,7 @@ class ChartDigitizerDialog(tk.Toplevel):
             return float(chart_cal.parse_y_value(s))
         return float(s)
 
-    def _build_calibration(self, cal: Optional[SeriesCalibration] = None) -> ChartCalibration:
+    def _build_calibration(self, cal: Optional[CalibrationConfig] = None) -> Calibration:
         # Use ROI bounds if axis pixels not set
         if cal is None:
             x0, y0, x1, y1 = self._roi_px()
@@ -3060,7 +3061,7 @@ class ChartDigitizerDialog(tk.Toplevel):
 
         xcal = AxisCalibration(p0=float(x0_px), p1=float(x1_px), v0=float(x0v), v1=float(x1v), scale=xs)
         ycal = AxisCalibration(p0=float(y0_px), p1=float(y1_px), v0=float(y0v), v1=float(y1v), scale=ys)
-        return ChartCalibration(x=xcal, y=ycal, x_date_format=date_fmt, y_date_format=date_fmt)
+        return Calibration(x=xcal, y=ycal, x_date_format=date_fmt, y_date_format=date_fmt)
 
     # ---------- Tree interactions ----------
     def _insert_tree_row(self, s: Series):

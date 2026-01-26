@@ -70,7 +70,7 @@ class AxisCalibration:
         raise ValueError(f"Unsupported scale: {self.scale}")
 
 @dataclass
-class ChartCalibration:
+class Calibration:
     x: AxisCalibration
     y: AxisCalibration
     x_date_format: str = "%Y"

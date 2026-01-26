@@ -12,7 +12,7 @@ StrideMode = Literal["continuous", "categorical"]
 
 
 @dataclass(frozen=True)
-class SeriesCalibration:
+class CalibrationConfig:
     name: str
     roi_px: Tuple[int, int, int, int]
     x_axis_px: Tuple[int, int]
@@ -30,6 +30,8 @@ class SeriesCalibration:
     y_step: float
     y_step_unit: str
     sample_mode: str
+
+
 @dataclass
 class PointFlags:
     enabled: bool = True
@@ -40,7 +42,7 @@ class Series:
     id: int
     name: str
     color_bgr: Tuple[int, int, int]
-    calibration: SeriesCalibration
+    calibration: CalibrationConfig
 
     # Primary chart kind for extraction/edit/export.
     # Backwards-compat: old code used mode in {"line","scatter"}.
@@ -65,7 +67,6 @@ class Series:
     mask_bitmap: Optional["np.ndarray"] = None
     # If True, treat the mask as an exclusion (negative) mask.
     mask_invert: bool = False
-
 
     # Optional seed pixel (set when user clicks the chart)
     seed_px: Optional[Tuple[int, int]] = None
@@ -100,27 +101,9 @@ class Series:
 
 
 @dataclass
-class ChartState:
-    # ROI bounds in pixels inclusive
-    xmin_px: int = 0
-    ymin_px: int = 0
-    xmax_px: int = 0
-    ymax_px: int = 0
-
-    # axis anchor pixels (None means use ROI bounds)
-    x0_px: Optional[int] = None
-    x1_px: Optional[int] = None
-    y0_px: Optional[int] = None
-    y1_px: Optional[int] = None
-
-    # axis values as strings (parsed depending on scale)
-    x0_val: str = ""
-    x1_val: str = ""
-    y0_val: str = ""
-    y1_val: str = ""
-
-    # output grid step (used for continuous stride in line/column/area)
-    x_step: float = 1.0
-
-    # color tolerance
-    color_tol: int = 30
+class ChartDocument:
+    chart_uri: Optional[str] = None
+    chart_blob: Optional[bytes] = None
+    image_sha256: Optional[str] = None
+    series: List[Series] = field(default_factory=list)
+    calibration_configs: List[CalibrationConfig] = field(default_factory=list)
