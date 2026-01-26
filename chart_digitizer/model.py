@@ -1,7 +1,10 @@
 from __future__ import annotations
 
 from dataclasses import dataclass, field
-from typing import List, Optional, Tuple, Literal
+from typing import List, Optional, Tuple, Literal, TYPE_CHECKING
+
+if TYPE_CHECKING:
+    import numpy as np
 
 
 ChartKind = Literal["line", "scatter", "column", "bar", "area"]
@@ -27,9 +30,6 @@ class SeriesCalibration:
     y_step: float
     y_step_unit: str
     sample_mode: str
-    scatter_match_thresh: float
-
-
 @dataclass
 class PointFlags:
     enabled: bool = True
@@ -54,14 +54,27 @@ class Series:
 
     # Prefer outline/edge pixels (often optimal for bar/area/column charts).
     prefer_outline: bool = True
+    # Per-series color tolerance.
+    color_tol: int = 20
+    # Per-series scatter template match threshold.
+    scatter_match_thresh: float = 0.6
 
     enabled: bool = True
+
+    # Optional per-series mask bitmap (uint8, 0/255) in full image coords.
+    mask_bitmap: Optional["np.ndarray"] = None
+    # If True, treat the mask as an exclusion (negative) mask.
+    mask_invert: bool = False
 
 
     # Optional seed pixel (set when user clicks the chart)
     seed_px: Optional[Tuple[int, int]] = None
     # Optional bbox (x0,y0,x1,y1) in image px for scatter template
     seed_bbox_px: Optional[Tuple[int, int, int, int]] = None
+    # Optional extra template bboxes in image px for scatter
+    scatter_seed_bboxes_px: List[Tuple[int, int, int, int]] = field(default_factory=list)
+    # Optional marker bounds for scatter overlay (x0,y0,x1,y1) in image px
+    scatter_marker_bboxes_px: List[Tuple[int, int, int, int]] = field(default_factory=list)
     # Optional marker bounds (x0,y0,x1,y1) in image px for scatter overlay
     seed_marker_bbox_px: Optional[Tuple[int, int, int, int]] = None
     # Optional extra seed pixels for improved tracking (Ctrl+click)

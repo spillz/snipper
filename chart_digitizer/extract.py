@@ -650,12 +650,14 @@ def extract_scatter_series(
     *,
     seed_px: Optional[Tuple[int,int]] = None,
     seed_bbox_px: Optional[Tuple[int,int,int,int]] = None,
+    seed_bboxes_px: Optional[Sequence[Tuple[int,int,int,int]]] = None,
     template_radius_px: int = 12,
     min_area_px: int = 6,
     split_overlaps: bool = True,
     shape_filter: bool = True,
     shape_match_thresh: float = 0.30,
     template_match_thresh: float = 0.6,
+    use_template_matching: bool = True,
 ) -> List[Tuple[int,int]]:
     """
     Extract scatter points inside ROI using a color mask, with optional overlap-splitting and
@@ -680,52 +682,61 @@ def extract_scatter_series(
     # Base color mask
     mask = color_distance_mask(roi_img, target_bgr, tol).astype(np.uint8) * 255
 
-    # Light cleanup: remove isolated specks while keeping thin strokes.
-    mask = cv2.medianBlur(mask, 3)
-    mask = cv2.morphologyEx(mask, cv2.MORPH_OPEN, np.ones((3,3), np.uint8), iterations=1)
+    # No blur/morphology: preserve thin marker strokes.
 
     H, W = mask.shape[:2]
 
     # ---------------- Seed template (optional) ----------------
     tmpl_contour = None
-    if seed_bbox_px is not None or seed_px is not None:
-        if seed_bbox_px is not None:
-            bx0, by0, bx1, by1 = seed_bbox_px
-            xl = max(0, min(int(bx0 - x0), W))
-            xr = max(0, min(int(bx1 - x0), W))
-            yl = max(0, min(int(by0 - y0), H))
-            yr = max(0, min(int(by1 - y0), H))
-        else:
-            sx, sy = seed_px if seed_px is not None else (None, None)
-            if sx is None or sy is None or not ((x0 <= sx < x1) and (y0 <= sy < y1)):
-                sx = None
-            if sx is not None:
-                sxl, syl = int(sx - x0), int(sy - y0)
-                r = int(max(4, template_radius_px))
-                xl = max(0, sxl - r); xr = min(W, sxl + r + 1)
-                yl = max(0, syl - r); yr = min(H, syl + r + 1)
-            else:
-                xl = xr = yl = yr = 0
+    tmpl_list: List[np.ndarray] = []
+    bboxes: List[Tuple[int, int, int, int]] = []
+    if seed_bbox_px is not None:
+        bboxes.append(seed_bbox_px)
+    if seed_bboxes_px:
+        bboxes.extend(list(seed_bboxes_px))
+    if not bboxes and seed_px is not None:
+        sx, sy = seed_px
+        if (x0 <= sx < x1) and (y0 <= sy < y1):
+            sxl, syl = int(sx - x0), int(sy - y0)
+            r = int(max(4, template_radius_px))
+            bboxes.append((sxl + x0 - r, syl + y0 - r, sxl + x0 + r + 1, syl + y0 + r + 1))
 
-        if xr > xl and yr > yl:
-            win = mask[yl:yr, xl:xr]
-            if win.size:
-                nz = np.argwhere(win > 0)
-                if nz.size:
-                    y_min = int(nz[:, 0].min())
-                    y_max = int(nz[:, 0].max())
-                    x_min = int(nz[:, 1].min())
-                    x_max = int(nz[:, 1].max())
-                    win = win[y_min:y_max+1, x_min:x_max+1]
-                # Keep the largest connected component in the window (seed marker should dominate).
-                nlab, labs, stats, _ = cv2.connectedComponentsWithStats((win > 0).astype(np.uint8), connectivity=8)
-                if nlab > 1:
-                    areas = stats[1:, cv2.CC_STAT_AREA]
-                    k = int(np.argmax(areas)) + 1
-                    comp = (labs == k).astype(np.uint8) * 255
-                    cnts, _hier = cv2.findContours(comp, cv2.RETR_EXTERNAL, cv2.CHAIN_APPROX_SIMPLE)
-                    if cnts:
-                        tmpl_contour = max(cnts, key=cv2.contourArea)
+    for bx0, by0, bx1, by1 in bboxes:
+        xl = max(0, min(int(bx0 - x0), W))
+        xr = max(0, min(int(bx1 - x0), W))
+        yl = max(0, min(int(by0 - y0), H))
+        yr = max(0, min(int(by1 - y0), H))
+        if xr <= xl or yr <= yl:
+            continue
+        win = mask[yl:yr, xl:xr]
+        if not win.size:
+            continue
+        nz = np.argwhere(win > 0)
+        if not nz.size:
+            if seed_px is not None and seed_bbox_px is None and not seed_bboxes_px:
+                # Seed click with no local mask pixels: abort early.
+                return []
+            continue
+        y_min = int(nz[:, 0].min())
+        y_max = int(nz[:, 0].max())
+        x_min = int(nz[:, 1].min())
+        x_max = int(nz[:, 1].max())
+        win = win[y_min:y_max+1, x_min:x_max+1]
+        if win.size:
+            tmpl_list.append(win.astype(np.uint8))
+
+        if tmpl_contour is None:
+            nlab, labs, stats, _ = cv2.connectedComponentsWithStats((win > 0).astype(np.uint8), connectivity=8)
+            if nlab > 1:
+                areas = stats[1:, cv2.CC_STAT_AREA]
+                k = int(np.argmax(areas)) + 1
+                comp = (labs == k).astype(np.uint8) * 255
+                cnts, _hier = cv2.findContours(comp, cv2.RETR_EXTERNAL, cv2.CHAIN_APPROX_SIMPLE)
+                if cnts:
+                    tmpl_contour = max(cnts, key=cv2.contourArea)
+
+    if use_template_matching and tmpl_list:
+        split_overlaps = False
 
     # ---------------- Overlap splitting (optional) ----------------
     labels = None
@@ -772,46 +783,50 @@ def extract_scatter_series(
             return True
         return score <= float(shape_match_thresh)
 
-    if seed_bbox_px is not None:
-        tmpl = None
-        if seed_bbox_px is not None:
-            bx0, by0, bx1, by1 = seed_bbox_px
-            xl = max(0, min(int(bx0 - x0), W))
-            xr = max(0, min(int(bx1 - x0), W))
-            yl = max(0, min(int(by0 - y0), H))
-            yr = max(0, min(int(by1 - y0), H))
-            if xr > xl and yr > yl:
-                win = mask[yl:yr, xl:xr]
-                if win.size:
-                    nz = np.argwhere(win > 0)
-                    if nz.size:
-                        y_min = int(nz[:, 0].min())
-                        y_max = int(nz[:, 0].max())
-                        x_min = int(nz[:, 1].min())
-                        x_max = int(nz[:, 1].max())
-                        tmpl = win[y_min:y_max+1, x_min:x_max+1]
+    if use_template_matching and not tmpl_list:
+        return []
+    if use_template_matching and tmpl_list:
+        scale = 1.0
+        src = mask.astype(np.float32)
 
-        if tmpl is not None and tmpl.shape[0] > 1 and tmpl.shape[1] > 1:
-            tmpl_f = tmpl.astype(np.float32)
-            src_f = mask.astype(np.float32)
-            res = cv2.matchTemplate(src_f, tmpl_f, cv2.TM_CCOEFF_NORMED)
+        candidates: List[Tuple[float, int, int, int, int]] = []
+        max_score_global = None
+        tmpl_info = []
+        for tmpl in tmpl_list:
+            if tmpl.shape[0] <= 1 or tmpl.shape[1] <= 1:
+                continue
+            tmpl_nz = int(np.count_nonzero(tmpl))
+            tmpl_info.append((int(tmpl.shape[1]), int(tmpl.shape[0]), tmpl_nz))
+            tmpl_s = tmpl.astype(np.float32)
+            t_h, t_w = tmpl_s.shape[:2]
+
+            if src.shape[0] < t_h or src.shape[1] < t_w:
+                continue
+            res = cv2.matchTemplate(src, tmpl_s, cv2.TM_CCOEFF_NORMED)
+            _, max_val, _, _ = cv2.minMaxLoc(res)
+            if max_score_global is None or float(max_val) > float(max_score_global):
+                max_score_global = float(max_val)
             ys, xs = np.where(res >= float(template_match_thresh))
-            if ys.size:
-                scores = res[ys, xs]
-                order = np.argsort(scores)[::-1]
-                min_dist = max(2, int(round(min(tmpl.shape[0], tmpl.shape[1]) / 2.0)))
-                kept: List[Tuple[int, int]] = []
-                for idx in order:
-                    x = int(xs[idx])
-                    y = int(ys[idx])
-                    cx = x + int(round(tmpl.shape[1] / 2.0))
-                    cy = y + int(round(tmpl.shape[0] / 2.0))
-                    if any((abs(cx - kx) <= min_dist and abs(cy - ky) <= min_dist) for (kx, ky) in kept):
-                        continue
-                    kept.append((cx, cy))
-                pts = [(x0 + kx, y0 + ky) for (kx, ky) in kept]
-                pts.sort(key=lambda p: (p[0], p[1]))
-                return pts
+            if not ys.size:
+                continue
+            scores = res[ys, xs]
+            rad = max(2, int(round(min(t_h, t_w) / 2.0)))
+            for j in range(int(len(scores))):
+                candidates.append((float(scores[j]), int(xs[j]), int(ys[j]), rad, int(t_w), int(t_h)))
+
+
+        if candidates:
+            candidates.sort(key=lambda v: v[0], reverse=True)
+            kept: List[Tuple[int, int]] = []
+            for score, x, y, rad, tw, th in candidates:
+                cx = x + int(round(tw / 2.0))
+                cy = y + int(round(th / 2.0))
+                if any((abs(cx - kx) <= rad and abs(cy - ky) <= rad) for (kx, ky) in kept):
+                    continue
+                kept.append((cx, cy))
+            pts = [(x0 + kx, y0 + ky) for (kx, ky) in kept]
+            pts.sort(key=lambda p: (p[0], p[1]))
+            return pts
 
     if labels is not None:
         # Parse watershed labels (2..)
@@ -866,6 +881,7 @@ def extract_scatter_series_fixed_stride(
     band_px: Optional[int] = None,
     seed_px: Optional[Tuple[int,int]] = None,
     seed_bbox_px: Optional[Tuple[int,int,int,int]] = None,
+    seed_bboxes_px: Optional[Sequence[Tuple[int,int,int,int]]] = None,
     template_match_thresh: float = 0.6,
 ) -> List[Optional[int]]:
     """
@@ -890,25 +906,37 @@ def extract_scatter_series_fixed_stride(
     roi_img = bgr[y0:y1, x0:x1]
     mask = color_distance_mask(roi_img, target_bgr, tol).astype(np.uint8) * 255
 
-    tmpl = None
+    tmpl_list: List[np.ndarray] = []
+    bboxes: List[Tuple[int, int, int, int]] = []
     if seed_bbox_px is not None:
-        bx0, by0, bx1, by1 = seed_bbox_px
+        bboxes.append(seed_bbox_px)
+    if seed_bboxes_px:
+        bboxes.extend(list(seed_bboxes_px))
+    if not bboxes and seed_px is not None:
+        sx, sy = seed_px
+        if (x0 <= sx < x1) and (y0 <= sy < y1):
+            sxl, syl = int(sx - x0), int(sy - y0)
+            r = int(max(4, 6))
+            bboxes.append((sxl + x0 - r, syl + y0 - r, sxl + x0 + r + 1, syl + y0 + r + 1))
+
+    for bx0, by0, bx1, by1 in bboxes:
         xl = max(0, min(int(bx0 - x0), mask.shape[1]))
         xr = max(0, min(int(bx1 - x0), mask.shape[1]))
         yl = max(0, min(int(by0 - y0), mask.shape[0]))
         yr = max(0, min(int(by1 - y0), mask.shape[0]))
-        if xr > xl and yr > yl:
-            win = mask[yl:yr, xl:xr]
-            nz = np.argwhere(win > 0)
-            if nz.size:
-                y_min = int(nz[:, 0].min())
-                y_max = int(nz[:, 0].max())
-                x_min = int(nz[:, 1].min())
-                x_max = int(nz[:, 1].max())
-                tmpl = win[y_min:y_max+1, x_min:x_max+1].astype(np.uint8)
+        if xr <= xl or yr <= yl:
+            continue
+        win = mask[yl:yr, xl:xr]
+        nz = np.argwhere(win > 0)
+        if nz.size:
+            y_min = int(nz[:, 0].min())
+            y_max = int(nz[:, 0].max())
+            x_min = int(nz[:, 1].min())
+            x_max = int(nz[:, 1].max())
+            tmpl_list.append(win[y_min:y_max+1, x_min:x_max+1].astype(np.uint8))
 
     H, W = mask.shape[:2]
-    if tmpl is None or tmpl.size == 0:
+    if not tmpl_list:
         pts = extract_scatter_series(
             bgr,
             roi,
@@ -916,7 +944,9 @@ def extract_scatter_series_fixed_stride(
             tol,
             seed_px=seed_px,
             seed_bbox_px=seed_bbox_px,
+            seed_bboxes_px=seed_bboxes_px,
             template_match_thresh=template_match_thresh,
+            use_template_matching=False,
         )
         results: List[Optional[int]] = []
         if mode == "fixed_x":
@@ -944,16 +974,25 @@ def extract_scatter_series_fixed_stride(
 
         raise ValueError(f"Unsupported fixed stride mode: {mode}")
 
-    if band_px is None:
-        band_px = max(1, int(round(min(tmpl.shape[0], tmpl.shape[1]) / 2.0)))
-
     results: List[Optional[int]] = []
-    tmpl_h, tmpl_w = tmpl.shape[:2]
-    min_band = max(1, int(round(min(tmpl_h, tmpl_w) / 3.0)))
-    band_px = max(min_band, int(band_px))
+    tmpl_min_dim = min(min(t.shape[0], t.shape[1]) for t in tmpl_list)
+    tmpl_w_max = max(t.shape[1] for t in tmpl_list)
+    tmpl_h_max = max(t.shape[0] for t in tmpl_list)
+    min_band = max(1, int(round(tmpl_min_dim / 3.0)))
+    band_px = max(min_band, int(band_px or min_band))
+
+    step_min = None
+    if len(grid_px) >= 2:
+        diffs = [abs(int(grid_px[i + 1]) - int(grid_px[i])) for i in range(len(grid_px) - 1)]
+        diffs = [d for d in diffs if d > 0]
+        if diffs:
+            step_min = min(diffs)
+    overlap_heavy = False
+    if step_min is not None and step_min > 0:
+        overlap_heavy = step_min < int(round(tmpl_min_dim * 0.8))
 
     if mode == "fixed_x":
-        band_px = max(int(band_px), int(round(tmpl_w / 2.0)))
+        band_px = max(int(band_px), int(round(tmpl_w_max / 2.0)))
         for xpx in grid_px:
             if xpx < x0 or xpx >= x1:
                 results.append(None)
@@ -962,21 +1001,45 @@ def extract_scatter_series_fixed_stride(
             xl = max(0, xc - int(band_px))
             xr = min(W - 1, xc + int(band_px))
             sl = mask[:, xl:(xr + 1)]
-            if sl.shape[1] < tmpl_w or sl.shape[0] < tmpl_h:
+            if sl.shape[1] < tmpl_w_max or sl.shape[0] < tmpl_h_max:
                 results.append(None)
                 continue
-            res = cv2.matchTemplate(sl, tmpl, cv2.TM_CCOEFF_NORMED)
-            _, max_val, _, max_loc = cv2.minMaxLoc(res)
-            if float(max_val) < float(template_match_thresh):
+            best_val = None
+            best_loc = None
+            best_th = None
+            best_tw = None
+            for tmpl in tmpl_list:
+                th, tw = tmpl.shape[:2]
+                if sl.shape[1] < tw or sl.shape[0] < th:
+                    continue
+                method = cv2.TM_CCORR_NORMED if overlap_heavy else cv2.TM_CCOEFF_NORMED
+                res = cv2.matchTemplate(sl, tmpl, method)
+                _, max_val, _, max_loc = cv2.minMaxLoc(res)
+                if best_val is None or float(max_val) > float(best_val):
+                    best_val = float(max_val)
+                    best_loc = max_loc
+                    best_th = th
+                    best_tw = tw
+            if best_val is None or float(best_val) < float(template_match_thresh):
                 results.append(None)
                 continue
-            y_loc = int(max_loc[1])
-            cy = y_loc + int(round(tmpl_h / 2.0))
+            y_loc = int(best_loc[1])
+            if overlap_heavy:
+                y1w = y_loc + best_th
+                x0w = int(best_loc[0])
+                x1w = x0w + int(best_tw)
+                win = sl[y_loc:y1w, x0w:x1w]
+                if win.size:
+                    density = float(np.count_nonzero(win)) / float(win.size)
+                    if density < 0.12:
+                        results.append(None)
+                        continue
+            cy = y_loc + int(round(best_th / 2.0))
             results.append(int(round(y0 + cy)))
         return results
 
     if mode == "fixed_y":
-        band_px = max(int(band_px), int(round(tmpl_h / 2.0)))
+        band_px = max(int(band_px), int(round(tmpl_h_max / 2.0)))
         for ypx in grid_px:
             if ypx < y0 or ypx >= y1:
                 results.append(None)
@@ -985,16 +1048,40 @@ def extract_scatter_series_fixed_stride(
             yl = max(0, yc - int(band_px))
             yr = min(H - 1, yc + int(band_px))
             sl = mask[yl:(yr + 1), :]
-            if sl.shape[1] < tmpl_w or sl.shape[0] < tmpl_h:
+            if sl.shape[1] < tmpl_w_max or sl.shape[0] < tmpl_h_max:
                 results.append(None)
                 continue
-            res = cv2.matchTemplate(sl, tmpl, cv2.TM_CCOEFF_NORMED)
-            _, max_val, _, max_loc = cv2.minMaxLoc(res)
-            if float(max_val) < float(template_match_thresh):
+            best_val = None
+            best_loc = None
+            best_tw = None
+            best_th = None
+            for tmpl in tmpl_list:
+                th, tw = tmpl.shape[:2]
+                if sl.shape[1] < tw or sl.shape[0] < th:
+                    continue
+                method = cv2.TM_CCORR_NORMED if overlap_heavy else cv2.TM_CCOEFF_NORMED
+                res = cv2.matchTemplate(sl, tmpl, method)
+                _, max_val, _, max_loc = cv2.minMaxLoc(res)
+                if best_val is None or float(max_val) > float(best_val):
+                    best_val = float(max_val)
+                    best_loc = max_loc
+                    best_tw = tw
+                    best_th = th
+            if best_val is None or float(best_val) < float(template_match_thresh):
                 results.append(None)
                 continue
-            x_loc = int(max_loc[0])
-            cx = x_loc + int(round(tmpl_w / 2.0))
+            x_loc = int(best_loc[0])
+            if overlap_heavy:
+                x1w = x_loc + best_tw
+                y0w = int(best_loc[1])
+                y1w = y0w + int(best_th)
+                win = sl[y0w:y1w, x_loc:x1w]
+                if win.size:
+                    density = float(np.count_nonzero(win)) / float(win.size)
+                    if density < 0.12:
+                        results.append(None)
+                        continue
+            cx = x_loc + int(round(best_tw / 2.0))
             results.append(int(round(x0 + cx)))
         return results
 

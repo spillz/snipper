@@ -71,6 +71,7 @@ class ChartDigitizerDialog(tk.Toplevel):
         self.var_tol = tk.IntVar(value=20)
         self.var_sample_mode = tk.StringVar(value="Free")
         self.var_scatter_match_thresh = tk.DoubleVar(value=0.6)
+        self.var_auto_rerun = tk.BooleanVar(value=False)
 
         self._date_unit_user_set = False
         self._date_unit_auto: Optional[str] = None
@@ -86,6 +87,18 @@ class ChartDigitizerDialog(tk.Toplevel):
         self._scatter_rb_start: Optional[Tuple[int, int]] = None
         self._scatter_rb_id: Optional[int] = None
         self._scatter_rb_active: bool = False
+        self._scatter_rb_additive: bool = False
+        self._mask_pen_radius = 8
+        self._mask_pen_shape = "circle"
+        self._mask_drawing = False
+        self._mask_draw_value = 255
+        self._mask_rb_start: Optional[Tuple[int, int]] = None
+        self._mask_rb_id: Optional[int] = None
+        self._mask_rb_active: bool = False
+        self._mask_rb_value = 255
+        self._suppress_mask_change = False
+        self._suppress_extraction_change = False
+        self.var_mask_invert = tk.BooleanVar(value=False)
 
         # axis click staging
         self._pending_axis: Optional[str] = None  # 'x0','x1','y0','y1' progress
@@ -105,6 +118,7 @@ class ChartDigitizerDialog(tk.Toplevel):
 
         left = ttk.Frame(self._panes)
         right = ttk.Frame(self._panes, width=340)
+        self._right_panel = right
         self._panes.add(left, weight=2)
         self._panes.add(right, weight=1)
 
@@ -113,7 +127,14 @@ class ChartDigitizerDialog(tk.Toplevel):
         bar.pack(side="top", fill="x")
 
         ttk.Label(bar, text="Tool:").pack(side="left")
-        for lbl, val in [("Set Region","roi"), ("Set X ticks","xaxis"), ("Set Y ticks","yaxis"), ("Add series","addseries"),("Edit series","editseries")]:
+        for lbl, val in [
+            ("Set Region", "roi"),
+            ("Set X ticks", "xaxis"),
+            ("Set Y ticks", "yaxis"),
+            ("Add series", "addseries"),
+            ("Edit series", "editseries"),
+            ("Mask series", "mask"),
+        ]:
             ttk.Radiobutton(bar, text=lbl, value=val, variable=self.tool_mode, command=self._on_tool_change).pack(side="left", padx=(8,0))
 
         ttk.Separator(bar, orient="vertical").pack(side="left", fill="y", padx=10)
@@ -156,17 +177,29 @@ class ChartDigitizerDialog(tk.Toplevel):
         self.canvas.bind("<Shift-ButtonPress-1>", self._on_scatter_rubberband_press)
         self.canvas.bind("<Shift-B1-Motion>", self._on_scatter_rubberband_motion)
         self.canvas.bind("<Shift-ButtonRelease-1>", self._on_scatter_rubberband_release)
+        self.canvas.bind("<Control-Shift-ButtonPress-1>", self._on_scatter_rubberband_press)
+        self.canvas.bind("<Control-Shift-B1-Motion>", self._on_scatter_rubberband_motion)
+        self.canvas.bind("<Control-Shift-ButtonRelease-1>", self._on_scatter_rubberband_release)
         self.canvas.bind("<Motion>", self._on_motion)
         self.canvas.bind("<Button-3>", self._on_right_click)
+        self.canvas.bind("<B3-Motion>", self._on_right_drag)
+        self.canvas.bind("<ButtonRelease-3>", self._on_right_release)
         self.canvas.bind("<Control-ButtonPress-1>", self._on_ctrl_toggle_press)
         self.canvas.bind("<Control-B1-Motion>", self._on_ctrl_toggle_drag)
         self.canvas.bind("<Control-ButtonRelease-1>", self._on_ctrl_toggle_release)
         self.canvas.bind("<Control-ButtonPress-3>", self._on_ctrl_toggle_press)
         self.canvas.bind("<Control-B3-Motion>", self._on_ctrl_toggle_drag)
         self.canvas.bind("<Control-ButtonRelease-3>", self._on_ctrl_toggle_release)
+        self.canvas.bind("<Shift-ButtonPress-3>", self._on_mask_rubberband_press_right)
+        self.canvas.bind("<Shift-B3-Motion>", self._on_mask_rubberband_motion)
+        self.canvas.bind("<Shift-ButtonRelease-3>", self._on_mask_rubberband_release)
+        self.canvas.bind("<MouseWheel>", self._on_mouse_wheel)
+        self.canvas.bind("<Shift-MouseWheel>", self._on_shift_mouse_wheel)
+        self.canvas.bind("<Leave>", self._on_canvas_leave)
 
         # Right panel: axis config
         ax = ttk.LabelFrame(right, text="Calibration", padding=8)
+        self._calibration_frame = ax
         ax.pack(side="top", fill="x")
 
         self.axis_px_values = tk.StringVar(value="")
@@ -285,11 +318,13 @@ class ChartDigitizerDialog(tk.Toplevel):
 
         cal_btns = ttk.Frame(ax)
         cal_btns.pack(fill="x", pady=(8,0))
-        ttk.Button(cal_btns, text="Apply to selected", command=self._apply_calibration_to_selected).pack(side="left")
+        ttk.Button(cal_btns, text="Update", command=self._apply_calibration_to_active).pack(side="left")
+        ttk.Button(cal_btns, text="Apply to...", command=self._apply_calibration_to_choose).pack(side="left", padx=(8,0))
         ttk.Button(cal_btns, text="Apply to all", command=self._apply_calibration_to_all).pack(side="left", padx=(8,0))
 
         # Extraction
         ext = ttk.LabelFrame(right, text="Extraction", padding=8)
+        self._extraction_frame = ext
         ext.pack(side="top", fill="x", pady=(8,0))
         row = ttk.Frame(ext)
         row.pack(fill="x")
@@ -298,14 +333,31 @@ class ChartDigitizerDialog(tk.Toplevel):
         match_row = ttk.Frame(ext)
         match_row.pack(fill="x", pady=(6,0))
         ttk.Label(match_row, text="Match thresh:").pack(side="left")
-        ttk.Entry(match_row, textvariable=self.var_scatter_match_thresh, width=6).pack(side="left", padx=(6,0))
-        ttk.Checkbutton(
-            ext, text="Span mode (bars/areas)", variable=self.var_prefer_outline,
-            command=self._on_series_mode_change
-        ).pack(side="top", anchor="w", pady=(6,0))
+        self.ent_match_thresh = ttk.Entry(match_row, textvariable=self.var_scatter_match_thresh, width=6)
+        self.ent_match_thresh.pack(side="left", padx=(6,0))
+        self.chk_prefer_outline = ttk.Checkbutton(
+            ext, text="Span detection (for bars/areas)", variable=self.var_prefer_outline,
+            command=self._on_prefer_outline_change
+        )
+        self.chk_prefer_outline.pack(side="top", anchor="w", pady=(6,0))
+
+        mask_row = ttk.Frame(ext)
+        mask_row.pack(fill="x", pady=(6, 0))
+        ttk.Label(mask_row, text="Mask:").pack(side="left")
+        self.chk_mask_invert = ttk.Checkbutton(
+            mask_row, text="Invert", variable=self.var_mask_invert, command=self._on_mask_invert_change
+        )
+        self.chk_mask_invert.pack(side="left", padx=(6, 0))
+        self.btn_clear_mask = ttk.Button(mask_row, text="Clear", command=self._clear_mask)
+        self.btn_clear_mask.pack(side="left", padx=(6, 0))
+        rerun_row = ttk.Frame(ext)
+        rerun_row.pack(fill="x", pady=(6,0))
+        ttk.Button(rerun_row, text="Re-run extraction", command=self._rerun_active_series).pack(side="left")
+        ttk.Checkbutton(rerun_row, text="Auto rerun", variable=self.var_auto_rerun).pack(side="left", padx=(8,0))
 
         # Series list
         lst = ttk.LabelFrame(right, text="Series", padding=8)
+        self._series_frame = lst
         lst.pack(side="top", fill="both", expand=True, pady=(8,0))
 
         self.tree = ttk.Treeview(lst, columns=("enabled","name","cal","n"), show="headings", selectmode="browse", height=12)
@@ -318,18 +370,21 @@ class ChartDigitizerDialog(tk.Toplevel):
         self.tree.column("cal", width=60, anchor="center")
         self.tree.column("n", width=60, anchor="e")
         self._configure_tree_rowheight()
-        self.tree.pack(fill="both", expand=True)
+        btns = ttk.Frame(lst)
+        self._series_btns_frame = btns
+        btns.pack(side="bottom", fill="x", pady=(8,0))
+        ttk.Button(btns, text="Toggle On/Off", command=self._toggle_series_enabled).pack(side="left")
+        ttk.Button(btns, text="Delete", command=self._delete_series).pack(side="left", padx=(8,0))
+        ttk.Button(btns, text="Delete All", command=self._delete_all_series).pack(side="left", padx=(8,0))
+
+        self.tree.pack(side="top", fill="both", expand=True)
 
         self.tree.bind("<<TreeviewSelect>>", self._on_tree_select)
         self.tree.bind("<Double-1>", self._on_tree_double_click)
 
-        btns = ttk.Frame(lst)
-        btns.pack(fill="x", pady=(8,0))
-        ttk.Button(btns, text="Toggle On/Off", command=self._toggle_series_enabled).pack(side="left")
-        ttk.Button(btns, text="Delete", command=self._delete_series).pack(side="left", padx=(8,0))
-
         # Export buttons
         exp = ttk.Frame(right)
+        self._export_frame = exp
         exp.pack(side="bottom", fill="x", pady=(8,0))
 
         ttk.Button(exp, text="Append CSV", command=self._append_csv).pack(side="left")
@@ -340,6 +395,59 @@ class ChartDigitizerDialog(tk.Toplevel):
         self.date_fmt.trace_add("write", lambda *_: self._on_date_fmt_change())
         self.var_categories.trace_add("write", lambda *_: self._update_category_count())
         self._refresh_scale_ui()
+        self._sync_mask_controls(None)
+        self._update_extraction_controls()
+        self.var_tol.trace_add("write", lambda *_: self._on_extraction_setting_change())
+        self.var_scatter_match_thresh.trace_add("write", lambda *_: self._on_extraction_setting_change())
+        if getattr(self, "_right_panel", None) is not None:
+            self._right_panel.bind("<Configure>", self._on_right_panel_configure)
+        self._bind_tab_order(ax)
+
+    def _bind_tab_order(self, container: ttk.Frame) -> None:
+        widgets = self._collect_focus_widgets(container)
+        for w in widgets:
+            w.bind("<Tab>", self._on_focus_tab, add="+")
+            w.bind("<Shift-Tab>", self._on_focus_shift_tab, add="+")
+
+    def _collect_focus_widgets(self, container: ttk.Frame) -> List[tk.Widget]:
+        widgets: List[tk.Widget] = []
+        stack = list(container.winfo_children())
+        while stack:
+            w = stack.pop(0)
+            stack.extend(w.winfo_children())
+            if not w.winfo_viewable():
+                continue
+            state = None
+            try:
+                state = str(w.cget("state"))
+            except Exception:
+                state = None
+            if state == "disabled":
+                continue
+            if isinstance(w, (ttk.Entry, ttk.Combobox)):
+                widgets.append(w)
+        return widgets
+
+    def _ordered_focus_widgets(self, container: ttk.Frame) -> List[tk.Widget]:
+        widgets = self._collect_focus_widgets(container)
+        widgets.sort(key=lambda w: (w.winfo_rooty(), w.winfo_rootx()))
+        return widgets
+
+    def _on_focus_tab(self, event):
+        return self._focus_next_in_container(event.widget, forward=True)
+
+    def _on_focus_shift_tab(self, event):
+        return self._focus_next_in_container(event.widget, forward=False)
+
+    def _focus_next_in_container(self, widget: tk.Widget, *, forward: bool) -> str:
+        container = widget.nametowidget(widget.winfo_parent())
+        widgets = self._ordered_focus_widgets(container)
+        if not widgets or widget not in widgets:
+            return "break"
+        idx = widgets.index(widget)
+        next_idx = (idx + (1 if forward else -1)) % len(widgets)
+        widgets[next_idx].focus_set()
+        return "break"
 
     def _configure_tree_rowheight(self):
         style = ttk.Style(self)
@@ -349,6 +457,7 @@ class ChartDigitizerDialog(tk.Toplevel):
         except Exception:
             font = tkfont.nametofont("TkDefaultFont")
         rowheight = max(18, int(font.metrics("linespace")) + 6)
+        self._tree_rowheight = int(rowheight)
         style.configure("Series.Treeview", rowheight=rowheight)
         self.tree.configure(style="Series.Treeview")
 
@@ -362,6 +471,36 @@ class ChartDigitizerDialog(tk.Toplevel):
         # Left ~67%, right ~33% by default.
         self._panes.sashpos(0, int(total * 0.67))
 
+    def _on_right_panel_configure(self, _evt=None) -> None:
+        if getattr(self, "_resize_after_id", None) is not None:
+            try:
+                self.after_cancel(self._resize_after_id)
+            except Exception:
+                pass
+        self._resize_after_id = self.after(50, self._update_series_list_height)
+
+    def _update_series_list_height(self) -> None:
+        if not getattr(self, "_series_frame", None):
+            return
+        if not getattr(self, "_right_panel", None):
+            return
+        if not getattr(self, "_tree_rowheight", None):
+            return
+        total = int(self._right_panel.winfo_height())
+        if total <= 0:
+            return
+        fixed = 0
+        for frm in (getattr(self, "_calibration_frame", None),
+                    getattr(self, "_extraction_frame", None),
+                    getattr(self, "_export_frame", None),
+                    getattr(self, "_series_btns_frame", None)):
+            if frm is None:
+                continue
+            fixed += int(frm.winfo_height())
+        available = max(0, total - fixed - 40)
+        rows = max(3, int(available / max(1, int(self._tree_rowheight))))
+        self.tree.configure(height=rows)
+
     def _is_x_date_scale(self) -> bool:
         return self.x_scale.get() == AxisScale.DATE.value
 
@@ -369,6 +508,10 @@ class ChartDigitizerDialog(tk.Toplevel):
         return self.y_scale.get() == AxisScale.DATE.value
 
     def _date_fmt_axis(self) -> str:
+        if self.series_mode.get() == "scatter":
+            if self.y_scale.get() == AxisScale.DATE.value and self.x_scale.get() != AxisScale.DATE.value:
+                return "y"
+            return "x"
         return "y" if self.series_mode.get() == "bar" else "x"
 
     def _stride_mode(self) -> str:
@@ -417,10 +560,27 @@ class ChartDigitizerDialog(tk.Toplevel):
         cat_scale = self.y_scale.get() if cat_axis == "y" else self.x_scale.get()
         is_categorical = cat_scale == AxisScale.CATEGORICAL.value
 
-        # Limit categorical option to the active categorical axis.
+        # Limit categorical/date options to the active axis.
         x_values = [AxisScale.LINEAR.value, AxisScale.LOG10.value]
         y_values = [AxisScale.LINEAR.value, AxisScale.LOG10.value]
-        if is_bar:
+        if self.series_mode.get() == "scatter":
+            sample_mode = self._sample_label_to_mode(self.var_sample_mode.get())
+            if sample_mode == "free":
+                cat_axis = "x"
+                is_categorical = False
+            elif sample_mode == "fixed_x":
+                x_values.append(AxisScale.DATE.value)
+                x_values.append(AxisScale.CATEGORICAL.value)
+                cat_axis = "x"
+                cat_scale = self.x_scale.get()
+                is_categorical = cat_scale == AxisScale.CATEGORICAL.value
+            elif sample_mode == "fixed_y":
+                y_values.append(AxisScale.DATE.value)
+                y_values.append(AxisScale.CATEGORICAL.value)
+                cat_axis = "y"
+                cat_scale = self.y_scale.get()
+                is_categorical = cat_scale == AxisScale.CATEGORICAL.value
+        elif is_bar:
             y_values.append(AxisScale.DATE.value)
             y_values.append(AxisScale.CATEGORICAL.value)
         else:
@@ -673,7 +833,6 @@ class ChartDigitizerDialog(tk.Toplevel):
         y_step = float(self.var_y_step.get())
         y_step_unit = (self.var_y_step_unit.get() or "").strip().lower()
         sample_mode = self._sample_label_to_mode(self.var_sample_mode.get())
-        scatter_match_thresh = float(self.var_scatter_match_thresh.get())
         return (
             roi,
             x_axis_px,
@@ -691,7 +850,6 @@ class ChartDigitizerDialog(tk.Toplevel):
             y_step,
             y_step_unit,
             sample_mode,
-            scatter_match_thresh,
         )
 
     def _calibration_key_from_series(self, s: Series) -> tuple:
@@ -713,7 +871,6 @@ class ChartDigitizerDialog(tk.Toplevel):
             cal.y_step,
             cal.y_step_unit,
             cal.sample_mode,
-            cal.scatter_match_thresh,
         )
 
     def _make_series_calibration_from_ui(self) -> SeriesCalibration:
@@ -740,7 +897,6 @@ class ChartDigitizerDialog(tk.Toplevel):
             y_step,
             y_step_unit,
             sample_mode,
-            scatter_match_thresh,
         ) = key
         return SeriesCalibration(
             name=name,
@@ -760,7 +916,6 @@ class ChartDigitizerDialog(tk.Toplevel):
             y_step=float(y_step),
             y_step_unit=y_step_unit,
             sample_mode=sample_mode,
-            scatter_match_thresh=float(scatter_match_thresh),
         )
 
     def _apply_series_calibration_to_ui(self, cal: SeriesCalibration) -> None:
@@ -780,16 +935,26 @@ class ChartDigitizerDialog(tk.Toplevel):
         self.var_y_step.set(float(cal.y_step))
         self.var_y_step_unit.set(cal.y_step_unit)
         self.var_sample_mode.set(self._sample_mode_to_label(cal.sample_mode))
-        self.var_scatter_match_thresh.set(float(cal.scatter_match_thresh))
         self._date_unit_user_set = True
         self._refresh_scale_ui()
         self._update_sample_mode_ui()
         self._update_tip()
         self._redraw_overlay()
 
+    def _apply_series_extraction_to_ui(self, s: Series) -> None:
+        self._suppress_extraction_change = True
+        try:
+            self.var_tol.set(int(getattr(s, "color_tol", self.var_tol.get())))
+            self.var_scatter_match_thresh.set(float(getattr(s, "scatter_match_thresh", self.var_scatter_match_thresh.get())))
+            self.var_prefer_outline.set(bool(getattr(s, "prefer_outline", True)))
+        finally:
+            self._suppress_extraction_change = False
+        self._update_extraction_controls()
+
     def _set_ui_mode_from_series(self, s: Series) -> None:
         kind = getattr(s, "chart_kind", getattr(s, "mode", "line"))
         self.series_mode.set(kind)
+        self.var_stacked.set(bool(getattr(s, "stacked", False)))
 
     def _pixel_bounds_changes(self, old: SeriesCalibration, new: SeriesCalibration) -> List[str]:
         changes: List[str] = []
@@ -799,23 +964,29 @@ class ChartDigitizerDialog(tk.Toplevel):
             changes.append("X axis pixels")
         if old.y_axis_px != new.y_axis_px:
             changes.append("Y axis pixels")
+        if old.x_step_unit != new.x_step_unit:
+            changes.append("X step unit")
+        if old.y_step_unit != new.y_step_unit:
+            changes.append("Y step unit")
+        if old.sample_mode != new.sample_mode:
+            changes.append("Sample mode")
         return changes
 
     def _apply_calibration_to_series(self, targets: List[Series]) -> None:
         if not targets:
-            messagebox.showinfo("Calibration", "No series to update.")
+            self._show_info("Calibration", "No series to update.")
             return
 
         mode = self.series_mode.get()
         mismatched = [s for s in targets if getattr(s, "chart_kind", s.mode) != mode]
         if mismatched:
-            messagebox.showinfo(
+            self._show_info(
                 "Calibration",
                 "Series type changes are not supported. Create a new series for a different type."
             )
             targets = [s for s in targets if s not in mismatched]
         if not targets:
-            messagebox.showinfo("Calibration", "No series updated (series type mismatch).")
+            self._show_info("Calibration", "No series updated (series type mismatch).")
             return
 
         new_cal = self._make_series_calibration_from_ui()
@@ -834,7 +1005,7 @@ class ChartDigitizerDialog(tk.Toplevel):
             self._update_tree_row(s)
 
         if to_reextract:
-            messagebox.showinfo(
+            self._show_info(
                 "Calibration",
                 f"Re-extracting {len(to_reextract)} series because pixel bounds changed: "
                 + ", ".join(sorted(change_set))
@@ -843,14 +1014,56 @@ class ChartDigitizerDialog(tk.Toplevel):
                 try:
                     self._extract_series(s)
                 except Exception as e:
-                    messagebox.showerror("Series extraction failed", str(e))
+                    self._show_error("Series extraction failed", str(e))
         else:
-            messagebox.showinfo("Calibration", f"Updated {updated} series. No re-extraction needed.")
+            self._show_info("Calibration", f"Updated {updated} series. No re-extraction needed.")
         self._redraw_overlay()
 
-    def _apply_calibration_to_selected(self) -> None:
+    def _apply_calibration_to_choose(self) -> None:
+        if not self.series:
+            self._show_info("Calibration", "No series to update yet.")
+            return
+
+        dlg = tk.Toplevel(self)
+        dlg.title("Apply calibration to...")
+        dlg.transient(self)
+        dlg.grab_set()
+
+        ttk.Label(dlg, text="Select series to update:").pack(anchor="w", padx=12, pady=(12, 6))
+        frm = ttk.Frame(dlg)
+        frm.pack(fill="both", expand=True, padx=12)
+
+        vars_by_id: dict[int, tk.BooleanVar] = {}
+        for s in self.series:
+            v = tk.BooleanVar(value=(s.id == self._active_series_id))
+            vars_by_id[s.id] = v
+            ttk.Checkbutton(frm, text=f"{s.name} ({s.calibration.name})", variable=v).pack(anchor="w")
+
+        btns = ttk.Frame(dlg)
+        btns.pack(fill="x", padx=12, pady=12)
+
+        def _on_ok() -> None:
+            chosen = [self._get_series(sid) for sid, v in vars_by_id.items() if v.get()]
+            targets = [s for s in chosen if s is not None]
+            dlg.destroy()
+            if not targets:
+                self._show_info("Calibration", "No series selected.")
+                return
+            self._apply_calibration_to_series(targets)
+
+        def _on_cancel() -> None:
+            dlg.destroy()
+
+        ttk.Button(btns, text="OK", command=_on_ok).pack(side="right")
+        ttk.Button(btns, text="Cancel", command=_on_cancel).pack(side="right", padx=(0, 8))
+
+        dlg.bind("<Return>", lambda _e: _on_ok())
+        dlg.bind("<Escape>", lambda _e: _on_cancel())
+        dlg.wait_window(dlg)
+
+    def _apply_calibration_to_active(self) -> None:
         if self._active_series_id is None:
-            messagebox.showinfo("Calibration", "Select a series first.")
+            self._show_info("Calibration", "Select a series first.")
             return
         s = self._get_series(self._active_series_id)
         if s is None:
@@ -859,7 +1072,7 @@ class ChartDigitizerDialog(tk.Toplevel):
 
     def _apply_calibration_to_all(self) -> None:
         if not self.series:
-            messagebox.showinfo("Calibration", "No series to update yet.")
+            self._show_info("Calibration", "No series to update yet.")
             return
         self._apply_calibration_to_series(list(self.series))
 
@@ -983,9 +1196,9 @@ class ChartDigitizerDialog(tk.Toplevel):
         elif mode == "addseries":
             if series_mode == "scatter":
                 msg = (
-                    "Add series (Scatter): Click a marker color to pick the series. "
-                    "Shift+drag draws a template window for matching scatter markers. "
-                    "The tool detects colored marker blobs inside the region and exports their (x,y) coordinates."
+                    "Add series (Scatter): Click a marker color to extract all points of that color. "
+                    "Shift+drag draws a rectangular selection around a marker to match on shape. "
+                    "Ctrl+click or Ctrl+Shift+drag add additional seed locations and/or marker shapes."
                 )
             elif series_mode == "line":
                 msg = (
@@ -1030,6 +1243,14 @@ class ChartDigitizerDialog(tk.Toplevel):
                     "For bars, dragging adjusts the bar length (X) while category position (Y) stays fixed. "
                     "Right-click a point toggles NA/disabled. Edits affect exported CSV values."
                 )
+        elif mode == "mask":
+            msg = (
+                "Mask series: Select a series, then draw a mask to limit extraction. "
+                "Left-drag paints, right-drag erases. Shift+drag draws a rectangle. "
+                "Mouse wheel changes pen size; Shift+wheel toggles circle/square. "
+                f"Use 'Invert' to switch between include/exclude behavior. "
+                f"Pen: {int(self._mask_pen_radius)}px {self._mask_pen_shape}."
+            )
         else:
             # fallback / none
             msg = (
@@ -1046,7 +1267,7 @@ class ChartDigitizerDialog(tk.Toplevel):
             if s is not None:
                 desired = getattr(s, "chart_kind", s.mode)
                 if self.series_mode.get() != desired:
-                    messagebox.showinfo(
+                    self._show_info(
                         "Series type",
                         "Series type changes are not supported. Create a new series for a different type."
                     )
@@ -1063,6 +1284,46 @@ class ChartDigitizerDialog(tk.Toplevel):
         self._update_tip()
         self._refresh_scale_ui()
         self._update_sample_mode_ui()
+        self._update_extraction_controls()
+
+    def _on_prefer_outline_change(self) -> None:
+        if getattr(self, "_suppress_extraction_change", False):
+            return
+        s = self._get_series(self._active_series_id) if self._active_series_id is not None else None
+        if s is None:
+            return
+        s.prefer_outline = bool(self.var_prefer_outline.get())
+        if self.var_auto_rerun.get():
+            try:
+                self._extract_series(s)
+            except Exception as e:
+                self._show_error("Series extraction failed", str(e))
+                return
+        self._update_tree_row(s)
+        self._redraw_overlay()
+
+    def _on_extraction_setting_change(self) -> None:
+        if getattr(self, "_suppress_extraction_change", False):
+            return
+        s = self._get_series(self._active_series_id) if self._active_series_id is not None else None
+        if s is None:
+            return
+        try:
+            s.color_tol = int(self.var_tol.get())
+        except (tk.TclError, ValueError):
+            return
+        try:
+            s.scatter_match_thresh = float(self.var_scatter_match_thresh.get())
+        except (tk.TclError, ValueError):
+            return
+        if self.var_auto_rerun.get():
+            try:
+                self._extract_series(s)
+            except Exception as e:
+                self._show_error("Series extraction failed", str(e))
+                return
+        self._update_tree_row(s)
+        self._redraw_overlay()
 
     def _sample_label_to_mode(self, label: str) -> str:
         label = (label or "").strip().lower()
@@ -1105,6 +1366,19 @@ class ChartDigitizerDialog(tk.Toplevel):
         self.ent_y_step.configure(state=y_state)
         self.cmb_y_step_units.configure(state=("readonly" if y_state == "normal" else "disabled"))
 
+    def _update_extraction_controls(self) -> None:
+        kind = self.series_mode.get()
+        if self._active_series_id is not None:
+            s = self._get_series(self._active_series_id)
+            if s is not None:
+                kind = getattr(s, "chart_kind", s.mode)
+        is_scatter = (kind == "scatter")
+        if getattr(self, "ent_match_thresh", None) is not None:
+            self.ent_match_thresh.configure(state=("normal" if is_scatter else "disabled"))
+        span_ok = kind in ("column", "bar", "area")
+        if getattr(self, "chk_prefer_outline", None) is not None:
+            self.chk_prefer_outline.configure(state=("normal" if span_ok else "disabled"))
+
     def _on_canvas_configure(self, _evt=None):
         # Avoid thrashing when resizing: schedule a single re-render
         if getattr(self, "_render_after_id", None) is not None:
@@ -1126,6 +1400,9 @@ class ChartDigitizerDialog(tk.Toplevel):
             if s is not None:
                 self._set_ui_mode_from_series(s)
                 self._apply_series_calibration_to_ui(s.calibration)
+        if mode == "mask":
+            s = self._get_series(self._active_series_id) if self._active_series_id is not None else None
+            self._sync_mask_controls(s)
         self._update_tip()
         self._redraw_overlay()
 
@@ -1188,6 +1465,12 @@ class ChartDigitizerDialog(tk.Toplevel):
             self.canvas.create_line(cx0, cy, cx1, cy, fill="#FFCC66", width=1, tags=("overlay",))
             self.canvas.create_text(ax0+2, cy+2, text=lbl, fill="#FFCC66", anchor="nw", tags=("overlay",))
 
+        # mask overlay
+        if self._active_series_id is not None:
+            s = self._get_series(self._active_series_id)
+            if s is not None:
+                self._draw_mask_overlay(s)
+
         # # active series overlay
         # if self._active_series_id is not None:
         #     s = self._get_series(self._active_series_id)
@@ -1248,27 +1531,28 @@ class ChartDigitizerDialog(tk.Toplevel):
                     seeds.append((s.seed_px, "#00B4FF"))
                 for ex in (s.extra_seeds_px or []):
                     seeds.append((ex, "#00E5FF"))
+                marker_bboxes = getattr(s, "scatter_marker_bboxes_px", []) or []
+                for i, bbox in enumerate(marker_bboxes):
+                    color = "#00B4FF" if i == 0 else "#00E5FF"
+                    mx0, my0, mx1, my1 = bbox
+                    cx0, cy0 = self._to_canvas(int(mx0), int(my0))
+                    cx1, cy1 = self._to_canvas(int(mx1), int(my1))
+                    self.canvas.create_oval(cx0, cy0, cx1, cy1,
+                                            outline="black", width=2, fill="",
+                                            tags=("overlay","seed"))
+                    self.canvas.create_oval(cx0+1, cy0+1, cx1-1, cy1-1,
+                                            outline=color, width=2, fill="",
+                                            tags=("overlay","seed"))
+
                 for (sx, sy), color in seeds:
-                    marker_bbox = getattr(s, "seed_marker_bbox_px", None)
-                    if marker_bbox:
-                        mx0, my0, mx1, my1 = marker_bbox
-                        cx0, cy0 = self._to_canvas(int(mx0), int(my0))
-                        cx1, cy1 = self._to_canvas(int(mx1), int(my1))
-                        self.canvas.create_oval(cx0, cy0, cx1, cy1,
-                                                outline="black", width=2, fill="",
-                                                tags=("overlay","seed"))
-                        self.canvas.create_oval(cx0+1, cy0+1, cx1-1, cy1-1,
-                                                outline=color, width=2, fill="",
-                                                tags=("overlay","seed"))
-                    else:
-                        cx, cy = self._to_canvas(int(sx), int(sy))
-                        r = 5
-                        self.canvas.create_oval(cx-r, cy-r, cx+r, cy+r,
-                                                outline="black", width=2, fill="",
-                                                tags=("overlay","seed"))
-                        self.canvas.create_oval(cx-(r-1), cy-(r-1), cx+(r-1), cy+(r-1),
-                                                outline=color, width=2, fill="",
-                                                tags=("overlay","seed"))
+                    cx, cy = self._to_canvas(int(sx), int(sy))
+                    r = 5
+                    self.canvas.create_oval(cx-r, cy-r, cx+r, cy+r,
+                                            outline="black", width=2, fill="",
+                                            tags=("overlay","seed"))
+                    self.canvas.create_oval(cx-(r-1), cy-(r-1), cx+(r-1), cy+(r-1),
+                                            outline=color, width=2, fill="",
+                                            tags=("overlay","seed"))
         self._update_axis_pixels_label()
 
     def _update_axis_pixels_label(self) -> None:
@@ -1280,6 +1564,43 @@ class ChartDigitizerDialog(tk.Toplevel):
             f"data region: x: {rx0}:{rx1}, y: {ry0}:{ry1}\n"
             f"x ticks x0:{x0_px} x1:{x1_px}, y ticks y0:{y0_px} y1:{y1_px}"
         )
+
+    def _show_info(self, title: str, message: str) -> None:
+        messagebox.showinfo(title, message, parent=self)
+
+    def _show_error(self, title: str, message: str) -> None:
+        messagebox.showerror(title, message, parent=self)
+
+    def _rerun_active_series(self) -> None:
+        if self._active_series_id is None:
+            return
+        s = self._get_series(self._active_series_id)
+        if s is None:
+            return
+        try:
+            self._extract_series(s)
+        except Exception as e:
+            self._show_error("Series extraction failed", str(e))
+            return
+        self._update_tree_row(s)
+        self._redraw_overlay()
+
+    def _draw_mask_overlay(self, s: Series) -> None:
+        mask = getattr(s, "mask_bitmap", None)
+        if mask is None:
+            return
+        if mask.shape[0] != self._ih or mask.shape[1] != self._iw:
+            return
+        alpha_val = 80
+        rgb = (0, 200, 255) if not getattr(s, "mask_invert", False) else (255, 90, 90)
+        alpha = (mask > 0).astype(np.uint8) * alpha_val
+        overlay = Image.new("RGBA", (self._iw, self._ih), (*rgb, alpha_val))
+        overlay.putalpha(Image.fromarray(alpha))
+        disp_w = int(self._iw * self._scale)
+        disp_h = int(self._ih * self._scale)
+        disp = overlay.resize((disp_w, disp_h), Image.NEAREST)
+        self._mask_photo = ImageTk.PhotoImage(disp)
+        self.canvas.create_image(self._offx, self._offy, image=self._mask_photo, anchor="nw", tags=("overlay", "mask"))
 
     # ---------- coordinate transforms ----------
     def _to_canvas(self, xpx: int, ypx: int) -> Tuple[int,int]:
@@ -1314,6 +1635,8 @@ class ChartDigitizerDialog(tk.Toplevel):
         if event.state & 0x0001:  # Shift held: handled by shift bindings
             if self.tool_mode.get() == "addseries" and self.series_mode.get() == "scatter":
                 return
+            if self.tool_mode.get() == "mask":
+                return
         xpx, ypx = self._to_image_px(event.x, event.y)
         mode = self.tool_mode.get()
 
@@ -1346,6 +1669,10 @@ class ChartDigitizerDialog(tk.Toplevel):
             self._add_series_from_click(xpx, ypx)
             return
 
+        if mode == "mask":
+            self._start_mask_draw(xpx, ypx, value=255)
+            return
+
         # mode == none: edit points
         self._start_point_drag(xpx, ypx)
 
@@ -1373,6 +1700,9 @@ class ChartDigitizerDialog(tk.Toplevel):
             return
         xpx, ypx = self._to_image_px(event.x, event.y)
         mode = self.tool_mode.get()
+        if mode == "mask" and self._mask_drawing:
+            self._apply_mask_brush(xpx, ypx, self._mask_draw_value)
+            return
         if mode == "roi" and getattr(self, "_roi_dragging", False):
             sx, sy = self._roi_drag_start
             x0 = min(sx, xpx); x1 = max(sx, xpx)
@@ -1440,6 +1770,11 @@ class ChartDigitizerDialog(tk.Toplevel):
     def _on_release(self, event):
         if self._scatter_rb_active:
             return
+        if self.tool_mode.get() == "mask":
+            if self._mask_drawing:
+                self._mask_drawing = False
+                self._finish_mask_edit()
+            return
         if self.tool_mode.get() == "roi":
             self._roi_dragging = False
 
@@ -1461,17 +1796,24 @@ class ChartDigitizerDialog(tk.Toplevel):
         self._toggle_seen.clear()
 
     def _on_scatter_rubberband_press(self, event):
+        if self.tool_mode.get() == "mask":
+            self._start_mask_rubberband(event, value=255)
+            return
         if self.tool_mode.get() != "addseries" or self.series_mode.get() != "scatter":
             return
         xpx, ypx = self._to_image_px(event.x, event.y)
         self._scatter_rb_start = (xpx, ypx)
         self._scatter_rb_active = True
+        self._scatter_rb_additive = bool(event.state & 0x0004)
         cx, cy = self._to_canvas(xpx, ypx)
         self._scatter_rb_id = self.canvas.create_rectangle(
             cx, cy, cx, cy, outline="#FFD166", width=1, tags=("overlay", "scatter_rb")
         )
 
     def _on_scatter_rubberband_motion(self, event):
+        if self._mask_rb_active:
+            self._update_mask_rubberband(event)
+            return
         if not self._scatter_rb_active or self._scatter_rb_start is None:
             return
         xpx, ypx = self._to_image_px(event.x, event.y)
@@ -1484,6 +1826,9 @@ class ChartDigitizerDialog(tk.Toplevel):
             self.canvas.coords(self._scatter_rb_id, cx0, cy0, cx1, cy1)
 
     def _on_scatter_rubberband_release(self, event):
+        if self._mask_rb_active:
+            self._finish_mask_rubberband(event)
+            return
         if not self._scatter_rb_active or self._scatter_rb_start is None:
             return
         xpx, ypx = self._to_image_px(event.x, event.y)
@@ -1492,6 +1837,8 @@ class ChartDigitizerDialog(tk.Toplevel):
         y0 = min(sy, ypx); y1 = max(sy, ypx)
         self._scatter_rb_active = False
         self._scatter_rb_start = None
+        additive = self._scatter_rb_additive
+        self._scatter_rb_additive = False
         if self._scatter_rb_id is not None:
             self.canvas.delete(self._scatter_rb_id)
             self._scatter_rb_id = None
@@ -1500,15 +1847,76 @@ class ChartDigitizerDialog(tk.Toplevel):
             self._add_series_from_click(xpx, ypx)
             return
 
-        self._add_scatter_series_from_bbox((x0, y0, x1, y1))
+        if additive:
+            self._add_scatter_template_from_bbox((x0, y0, x1, y1))
+        else:
+            self._add_scatter_series_from_bbox((x0, y0, x1, y1))
+
+    def _on_mask_rubberband_press_right(self, event):
+        if self.tool_mode.get() != "mask":
+            return
+        self._start_mask_rubberband(event, value=0)
+
+    def _on_mask_rubberband_motion(self, event):
+        self._on_scatter_rubberband_motion(event)
+
+    def _on_mask_rubberband_release(self, event):
+        self._on_scatter_rubberband_release(event)
+
+    def _start_mask_rubberband(self, event, *, value: int) -> None:
+        s = self._get_series(self._active_series_id) if self._active_series_id is not None else None
+        if s is None:
+            return
+        xpx, ypx = self._to_image_px(event.x, event.y)
+        self._mask_rb_start = (xpx, ypx)
+        self._mask_rb_active = True
+        self._mask_rb_value = int(value)
+        cx, cy = self._to_canvas(xpx, ypx)
+        self._mask_rb_id = self.canvas.create_rectangle(
+            cx, cy, cx, cy, outline="#7AE7FF", width=1, tags=("overlay", "mask_rb")
+        )
+
+    def _update_mask_rubberband(self, event) -> None:
+        if not self._mask_rb_active or self._mask_rb_start is None:
+            return
+        xpx, ypx = self._to_image_px(event.x, event.y)
+        sx, sy = self._mask_rb_start
+        x0 = min(sx, xpx); x1 = max(sx, xpx)
+        y0 = min(sy, ypx); y1 = max(sy, ypx)
+        cx0, cy0 = self._to_canvas(x0, y0)
+        cx1, cy1 = self._to_canvas(x1, y1)
+        if self._mask_rb_id is not None:
+            self.canvas.coords(self._mask_rb_id, cx0, cy0, cx1, cy1)
+
+    def _finish_mask_rubberband(self, event) -> None:
+        if not self._mask_rb_active or self._mask_rb_start is None:
+            return
+        xpx, ypx = self._to_image_px(event.x, event.y)
+        sx, sy = self._mask_rb_start
+        x0 = min(sx, xpx); x1 = max(sx, xpx)
+        y0 = min(sy, ypx); y1 = max(sy, ypx)
+        self._mask_rb_active = False
+        self._mask_rb_start = None
+        if self._mask_rb_id is not None:
+            self.canvas.delete(self._mask_rb_id)
+            self._mask_rb_id = None
+
+        if (x1 - x0) <= 1 and (y1 - y0) <= 1:
+            self._apply_mask_brush(xpx, ypx, self._mask_rb_value)
+        else:
+            self._apply_mask_rect(x0, y0, x1, y1, self._mask_rb_value)
+        self._finish_mask_edit()
     def _on_right_click(self, event):
         # Edit-series helpers:
         # - Right-click on point: toggle enabled/NA state
         # - Right-click away from points (scatter only): insert a new point at that location (sorted by X)
+        xpx, ypx = self._to_image_px(event.x, event.y)
+        if self.tool_mode.get() == "mask":
+            self._start_mask_draw(xpx, ypx, value=0)
+            return
         if self.tool_mode.get() != "editseries" or self._active_series_id is None:
             return
 
-        xpx, ypx = self._to_image_px(event.x, event.y)
         s = self._get_series(self._active_series_id)
         if not s:
             return
@@ -1559,8 +1967,159 @@ class ChartDigitizerDialog(tk.Toplevel):
         s.point_enabled[idx] = not s.point_enabled[idx]
         self._redraw_overlay()
 
+    def _on_right_drag(self, event):
+        if self.tool_mode.get() != "mask" or not self._mask_drawing:
+            return
+        xpx, ypx = self._to_image_px(event.x, event.y)
+        self._apply_mask_brush(xpx, ypx, self._mask_draw_value)
+
+    def _on_right_release(self, _event):
+        if self.tool_mode.get() != "mask":
+            return
+        if self._mask_drawing:
+            self._mask_drawing = False
+            self._finish_mask_edit()
+
+    def _on_mouse_wheel(self, event):
+        if self.tool_mode.get() != "mask":
+            return
+        delta = 1 if event.delta > 0 else -1
+        self._mask_pen_radius = max(1, min(80, int(self._mask_pen_radius) + delta))
+        self._update_tip()
+
+    def _on_shift_mouse_wheel(self, event):
+        if self.tool_mode.get() != "mask":
+            return
+        if event.delta == 0:
+            return
+        self._mask_pen_shape = "square" if self._mask_pen_shape == "circle" else "circle"
+        self._update_tip()
+
+    def _start_mask_draw(self, xpx: int, ypx: int, *, value: int) -> None:
+        s = self._get_series(self._active_series_id) if self._active_series_id is not None else None
+        if s is None:
+            return
+        self._mask_drawing = True
+        self._mask_draw_value = int(value)
+        self._apply_mask_brush(xpx, ypx, self._mask_draw_value)
+
+    def _apply_mask_brush(self, xpx: int, ypx: int, value: int) -> None:
+        s = self._get_series(self._active_series_id) if self._active_series_id is not None else None
+        if s is None:
+            return
+        mask = self._ensure_series_mask(s)
+        r = max(1, int(self._mask_pen_radius))
+        x0 = max(0, xpx - r)
+        x1 = min(self._iw - 1, xpx + r)
+        y0 = max(0, ypx - r)
+        y1 = min(self._ih - 1, ypx + r)
+        if self._mask_pen_shape == "square":
+            mask[y0:y1 + 1, x0:x1 + 1] = int(value)
+        else:
+            ys, xs = np.ogrid[y0:y1 + 1, x0:x1 + 1]
+            dist2 = (xs - xpx) ** 2 + (ys - ypx) ** 2
+            region = mask[y0:y1 + 1, x0:x1 + 1]
+            region[dist2 <= (r * r)] = int(value)
+        self._redraw_overlay()
+
+    def _apply_mask_rect(self, x0: int, y0: int, x1: int, y1: int, value: int) -> None:
+        s = self._get_series(self._active_series_id) if self._active_series_id is not None else None
+        if s is None:
+            return
+        mask = self._ensure_series_mask(s)
+        x0 = max(0, min(self._iw - 1, int(x0)))
+        x1 = max(0, min(self._iw - 1, int(x1)))
+        y0 = max(0, min(self._ih - 1, int(y0)))
+        y1 = max(0, min(self._ih - 1, int(y1)))
+        if x1 < x0:
+            x0, x1 = x1, x0
+        if y1 < y0:
+            y0, y1 = y1, y0
+        mask[y0:y1 + 1, x0:x1 + 1] = int(value)
+        self._redraw_overlay()
+
+    def _finish_mask_edit(self) -> None:
+        s = self._get_series(self._active_series_id) if self._active_series_id is not None else None
+        if s is None:
+            return
+        if self.var_auto_rerun.get():
+            try:
+                self._extract_series(s)
+            except Exception as e:
+                self._show_error("Series extraction failed", str(e))
+        self._update_tree_row(s)
+        self._redraw_overlay()
+
+    def _ensure_series_mask(self, s: Series) -> np.ndarray:
+        mask = getattr(s, "mask_bitmap", None)
+        if mask is None or mask.shape[0] != self._ih or mask.shape[1] != self._iw:
+            mask = np.zeros((self._ih, self._iw), dtype=np.uint8)
+            s.mask_bitmap = mask
+        return mask
+
+    def _mask_allows_point(self, s: Series, xpx: int, ypx: int) -> bool:
+        mask = getattr(s, "mask_bitmap", None)
+        if mask is None:
+            return True
+        if ypx < 0 or ypx >= mask.shape[0] or xpx < 0 or xpx >= mask.shape[1]:
+            return False
+        allowed = bool(mask[int(ypx), int(xpx)] > 0)
+        if getattr(s, "mask_invert", False):
+            allowed = not allowed
+        return allowed
+
+    def _apply_series_mask_to_roi(self, s: Series, roi: Tuple[int, int, int, int], mask: np.ndarray) -> np.ndarray:
+        series_mask = getattr(s, "mask_bitmap", None)
+        if series_mask is None:
+            return mask
+        x0, y0, x1, y1 = roi
+        x0 = max(0, min(self._iw, int(x0)))
+        x1 = max(0, min(self._iw, int(x1)))
+        y0 = max(0, min(self._ih, int(y0)))
+        y1 = max(0, min(self._ih, int(y1)))
+        if x1 <= x0 or y1 <= y0:
+            return mask
+        sm = series_mask[y0:y1, x0:x1]
+        if sm.shape != mask.shape:
+            return mask
+        if getattr(s, "mask_invert", False):
+            allow = (sm == 0)
+        else:
+            allow = (sm > 0)
+        masked = mask.copy()
+        masked[~allow] = 0
+        return masked
+
+    def _sync_mask_controls(self, s: Optional[Series]) -> None:
+        self._suppress_mask_change = True
+        self.var_mask_invert.set(bool(getattr(s, "mask_invert", False)) if s is not None else False)
+        self._suppress_mask_change = False
+        state = "normal" if s is not None else "disabled"
+        if hasattr(self, "chk_mask_invert"):
+            self.chk_mask_invert.configure(state=state)
+        if hasattr(self, "btn_clear_mask"):
+            self.btn_clear_mask.configure(state=state)
+
+    def _on_mask_invert_change(self) -> None:
+        if self._suppress_mask_change:
+            return
+        s = self._get_series(self._active_series_id) if self._active_series_id is not None else None
+        if s is None:
+            return
+        s.mask_invert = bool(self.var_mask_invert.get())
+        self._finish_mask_edit()
+
+    def _clear_mask(self) -> None:
+        s = self._get_series(self._active_series_id) if self._active_series_id is not None else None
+        if s is None:
+            return
+        s.mask_bitmap = None
+        self._finish_mask_edit()
+
     def _on_ctrl_toggle_press(self, event):
         if self.tool_mode.get() == "addseries":
+            if (event.state & 0x0001) and self.series_mode.get() == "scatter":
+                return
             if self._add_extra_seed_from_click(event):
                 return
         if self.tool_mode.get() != "editseries" or self._active_series_id is None:
@@ -1613,7 +2172,7 @@ class ChartDigitizerDialog(tk.Toplevel):
             s = self._get_series(self._active_series_id)
         if s is None and self.series:
             s = self.series[-1]
-        if not s or getattr(s, "chart_kind", s.mode) != "line":
+        if not s or getattr(s, "chart_kind", s.mode) not in ("line", "scatter"):
             return False
 
         xpx, ypx = self._to_image_px(event.x, event.y)
@@ -1621,10 +2180,28 @@ class ChartDigitizerDialog(tk.Toplevel):
             s.extra_seeds_px = []
         s.extra_seeds_px.append((xpx, ypx))
 
+        if getattr(s, "chart_kind", s.mode) == "scatter":
+            if s.scatter_seed_bboxes_px is None:
+                s.scatter_seed_bboxes_px = []
+            if s.seed_bbox_px is None:
+                r = 12
+                s.seed_bbox_px = (xpx - r, ypx - r, xpx + r, ypx + r)
+                s.scatter_seed_bboxes_px.append(s.seed_bbox_px)
+            r = 12
+            s.scatter_seed_bboxes_px.append((xpx - r, ypx - r, xpx + r, ypx + r))
+            try:
+                self._extract_series(s)
+            except Exception as e:
+                self._show_error("Series extraction failed", str(e))
+                return True
+            self._update_tree_row(s)
+            self._redraw_overlay()
+            return True
+
         try:
             self._extract_series(s)
         except Exception as e:
-            messagebox.showerror("Series extraction failed", str(e))
+            self._show_error("Series extraction failed", str(e))
             return True
 
         self._update_tree_row(s)
@@ -1635,6 +2212,7 @@ class ChartDigitizerDialog(tk.Toplevel):
     def _on_motion(self, event):
         xpx, ypx = self._to_image_px(event.x, event.y)
         self._draw_loupe(xpx, ypx)
+        self._update_mask_cursor(event.x, event.y)
 
     def _draw_loupe(self, xpx: int, ypx: int):
         # 12x12 region scaled to 10x
@@ -1654,6 +2232,49 @@ class ChartDigitizerDialog(tk.Toplevel):
         self.loupe.create_line(cx, 0, cx, size*zoom, fill="red")
         self.loupe.create_line(0, cy, size*zoom, cy, fill="red")
 
+    def _on_canvas_leave(self, _event):
+        self._clear_mask_cursor()
+
+    def _clear_mask_cursor(self) -> None:
+        self.canvas.delete("mask_cursor")
+
+    def _update_mask_cursor(self, cx: float, cy: float) -> None:
+        if self.tool_mode.get() != "mask":
+            self._clear_mask_cursor()
+            return
+        s = self._get_series(self._active_series_id) if self._active_series_id is not None else None
+        if s is None:
+            self._clear_mask_cursor()
+            return
+        r = max(1.0, float(self._mask_pen_radius) * float(self._scale))
+        x0 = float(cx) - r
+        y0 = float(cy) - r
+        x1 = float(cx) + r
+        y1 = float(cy) + r
+        self.canvas.delete("mask_cursor")
+        if self._mask_pen_shape == "square":
+            self.canvas.create_rectangle(
+                x0, y0, x1, y1,
+                outline="black", width=2,
+                tags=("mask_cursor",)
+            )
+            self.canvas.create_rectangle(
+                x0, y0, x1, y1,
+                outline="#7AE7FF", width=1,
+                tags=("mask_cursor",)
+            )
+        else:
+            self.canvas.create_oval(
+                x0, y0, x1, y1,
+                outline="black", width=2,
+                tags=("mask_cursor",)
+            )
+            self.canvas.create_oval(
+                x0, y0, x1, y1,
+                outline="#7AE7FF", width=1,
+                tags=("mask_cursor",)
+            )
+
     # ---------- Series management ----------
     def _add_series_from_click(self, xpx: int, ypx: int):
         self._add_series_from_seed(xpx, ypx, seed_bbox_px=None)
@@ -1663,6 +2284,143 @@ class ChartDigitizerDialog(tk.Toplevel):
         cx = int(round((x0 + x1) / 2.0))
         cy = int(round((y0 + y1) / 2.0))
         self._add_series_from_seed(cx, cy, seed_bbox_px=bbox)
+
+    def _add_scatter_template_from_bbox(self, bbox: Tuple[int, int, int, int]):
+        s = self._get_series(self._active_series_id) if self._active_series_id is not None else None
+        if s is None and self.series:
+            s = self.series[-1]
+        if s is None or getattr(s, "chart_kind", s.mode) != "scatter":
+            self._add_scatter_series_from_bbox(bbox)
+            return
+
+        patch = self._patch_from_bbox(bbox)
+        if self._should_reject_uniform_patch(patch):
+            self._show_info("Scatter", "No marker detected in the selection.")
+            return
+
+        x0, y0, x1, y1 = bbox
+        centroid = self._bbox_mask_centroid(bbox, s.color_bgr)
+        if centroid is None:
+            cx = int(round((x0 + x1) / 2.0))
+            cy = int(round((y0 + y1) / 2.0))
+        else:
+            cx, cy = centroid
+        if s.extra_seeds_px is None:
+            s.extra_seeds_px = []
+        s.extra_seeds_px.append((int(cx), int(cy)))
+        if s.seed_bbox_px is None:
+            s.seed_bbox_px = bbox
+        s.scatter_seed_bboxes_px.append(bbox)
+
+        marker_bbox = self._marker_bbox_from_bbox(bbox, s.color_bgr)
+        if marker_bbox is not None:
+            s.scatter_marker_bboxes_px.append(marker_bbox)
+
+        try:
+            self._extract_series(s)
+        except Exception as e:
+            self._show_error("Series extraction failed", str(e))
+            return
+
+        self._update_tree_row(s)
+        self._redraw_overlay()
+
+    def _marker_bbox_from_bbox(
+        self,
+        bbox: Tuple[int, int, int, int],
+        target: Tuple[int, int, int],
+    ) -> Optional[Tuple[int, int, int, int]]:
+        bx0, by0, bx1, by1 = bbox
+        bx0 = max(0, min(self._iw - 1, int(bx0)))
+        bx1 = max(0, min(self._iw - 1, int(bx1)))
+        by0 = max(0, min(self._ih - 1, int(by0)))
+        by1 = max(0, min(self._ih - 1, int(by1)))
+        if bx1 < bx0:
+            bx0, bx1 = bx1, bx0
+        if by1 < by0:
+            by0, by1 = by1, by0
+        patch = self._bgr[by0:by1+1, bx0:bx1+1, :]
+        if not patch.size:
+            return None
+        tol = int(self.var_tol.get())
+        mask = color_distance_mask(patch, target, tol).astype(np.uint8)
+        nz = np.argwhere(mask > 0)
+        if not nz.size:
+            return None
+        y_min = int(nz[:, 0].min())
+        y_max = int(nz[:, 0].max())
+        x_min = int(nz[:, 1].min())
+        x_max = int(nz[:, 1].max())
+        h = int(y_max - y_min)
+        w = int(x_max - x_min)
+        cy = float(nz[:, 0].mean())
+        cx = float(nz[:, 1].mean())
+        x0c = int(round(cx - w / 2.0))
+        y0c = int(round(cy - h / 2.0))
+        x1c = int(x0c + w)
+        y1c = int(y0c + h)
+        x0c = max(0, min((bx1 - bx0), x0c))
+        y0c = max(0, min((by1 - by0), y0c))
+        x1c = max(0, min((bx1 - bx0), x1c))
+        y1c = max(0, min((by1 - by0), y1c))
+        return (int(bx0 + x0c), int(by0 + y0c), int(bx0 + x1c), int(by0 + y1c))
+
+    def _patch_from_bbox(self, bbox: Tuple[int, int, int, int]) -> np.ndarray:
+        bx0, by0, bx1, by1 = bbox
+        bx0 = max(0, min(self._iw - 1, int(bx0)))
+        bx1 = max(0, min(self._iw - 1, int(bx1)))
+        by0 = max(0, min(self._ih - 1, int(by0)))
+        by1 = max(0, min(self._ih - 1, int(by1)))
+        if bx1 < bx0:
+            bx0, bx1 = bx1, bx0
+        if by1 < by0:
+            by0, by1 = by1, by0
+        return self._bgr[by0:by1+1, bx0:bx1+1, :]
+
+    def _should_reject_uniform_patch(self, patch: np.ndarray) -> bool:
+        if patch is None or not patch.size:
+            return True
+        flat = patch.reshape(-1, 3).astype(np.float32)
+        rng = flat.max(axis=0) - flat.min(axis=0)
+        std = float(flat.std())
+        if np.max(rng) > 2.0 or std > 1.0:
+            return False
+        roi = self._roi_px()
+        rx0, ry0, rx1, ry1 = roi
+        roi_patch = self._bgr[ry0:ry1, rx0:rx1, :]
+        if not roi_patch.size:
+            return True
+        roi_med = np.median(roi_patch.reshape(-1, 3).astype(np.float32), axis=0)
+        patch_med = np.median(flat, axis=0)
+        dist = float(np.linalg.norm(patch_med - roi_med))
+        tol = float(self.var_tol.get())
+        return dist <= max(5.0, tol)
+
+    def _bbox_mask_centroid(
+        self,
+        bbox: Tuple[int, int, int, int],
+        target: Tuple[int, int, int],
+    ) -> Optional[Tuple[int, int]]:
+        bx0, by0, bx1, by1 = bbox
+        bx0 = max(0, min(self._iw - 1, int(bx0)))
+        bx1 = max(0, min(self._iw - 1, int(bx1)))
+        by0 = max(0, min(self._ih - 1, int(by0)))
+        by1 = max(0, min(self._ih - 1, int(by1)))
+        if bx1 < bx0:
+            bx0, bx1 = bx1, bx0
+        if by1 < by0:
+            by0, by1 = by1, by0
+        patch = self._bgr[by0:by1+1, bx0:bx1+1, :]
+        if not patch.size:
+            return None
+        tol = int(self.var_tol.get())
+        mask = color_distance_mask(patch, target, tol).astype(np.uint8)
+        nz = np.argwhere(mask > 0)
+        if not nz.size:
+            return None
+        cy = float(nz[:, 0].mean())
+        cx = float(nz[:, 1].mean())
+        return (int(round(bx0 + cx)), int(round(by0 + cy)))
 
     def _add_series_from_seed(self, xpx: int, ypx: int, *, seed_bbox_px: Optional[Tuple[int, int, int, int]]):
         require_cv2()
@@ -1684,16 +2442,18 @@ class ChartDigitizerDialog(tk.Toplevel):
                 idx = int(np.argmax(d))
                 b, g, r = flat[idx].tolist()
                 target = (int(b), int(g), int(r))
-            else:
-                b, g, r = self._bgr[ypx, xpx].tolist()
-                target = (int(b), int(g), int(r))
-                patch = self._bgr[max(0,ypx-3):ypx+4, max(0,xpx-3):xpx+4, :]
+            if self.series_mode.get() == "scatter":
+                if self._should_reject_uniform_patch(patch):
+                    self._show_info("Scatter", "No marker detected in the selection.")
+                    return
         else:
             b, g, r = self._bgr[ypx, xpx].tolist()
             target = (int(b), int(g), int(r))
             patch = self._bgr[max(0,ypx-3):ypx+4, max(0,xpx-3):xpx+4, :]
-
-        print("picked BGR:", target, "patch median:", np.median(patch.reshape(-1,3), axis=0))
+            if self.series_mode.get() == "scatter":
+                if self._should_reject_uniform_patch(patch):
+                    self._show_info("Scatter", "No marker detected in the selection.")
+                    return
 
         sid = self._next_series_id
         self._next_series_id += 1
@@ -1710,25 +2470,22 @@ class ChartDigitizerDialog(tk.Toplevel):
             stacked=bool(self.var_stacked.get()),
             stride_mode=str(self._stride_mode_for_calibration(calibration, mode)),
             prefer_outline=bool(self.var_prefer_outline.get()),
+            color_tol=int(self.var_tol.get()),
+            scatter_match_thresh=float(self.var_scatter_match_thresh.get()),
             calibration=calibration,
         )
+        if seed_bbox_px is not None:
+            centroid = self._bbox_mask_centroid(seed_bbox_px, target)
+            if centroid is not None:
+                xpx, ypx = centroid
         s.seed_px = (xpx, ypx)
         if seed_bbox_px is not None:
             s.seed_bbox_px = seed_bbox_px
-            tol = int(self.var_tol.get())
-            mask = color_distance_mask(patch, target, tol).astype(np.uint8)
-            nz = np.argwhere(mask > 0)
-            if nz.size:
-                y_min = int(nz[:, 0].min())
-                y_max = int(nz[:, 0].max())
-                x_min = int(nz[:, 1].min())
-                x_max = int(nz[:, 1].max())
-                s.seed_marker_bbox_px = (
-                    int(bx0 + x_min),
-                    int(by0 + y_min),
-                    int(bx0 + x_max),
-                    int(by0 + y_max),
-                )
+            s.scatter_seed_bboxes_px = [seed_bbox_px]
+            marker_bbox = self._marker_bbox_from_bbox(seed_bbox_px, target)
+            if marker_bbox is not None:
+                s.seed_marker_bbox_px = marker_bbox
+                s.scatter_marker_bboxes_px = [marker_bbox]
         self.series.append(s)
         self._insert_tree_row(s)
 
@@ -1736,7 +2493,20 @@ class ChartDigitizerDialog(tk.Toplevel):
         try:
             self._extract_series(s)
         except Exception as e:
-            messagebox.showerror("Series extraction failed", str(e))
+            self._show_error("Series extraction failed", str(e))
+
+        if s.mode == "scatter" and not s.points:
+            sample_mode = getattr(s.calibration, "sample_mode", "free")
+            if s.seed_bbox_px and sample_mode in ("fixed_x", "fixed_y"):
+                msg = "Template matching found no matches. Try lowering Match thresh or use Free."
+            else:
+                msg = "No scatter points detected for that selection."
+            if self.tree.exists(str(s.id)):
+                self.tree.delete(str(s.id))
+            self.series = [ser for ser in self.series if ser.id != s.id]
+            self._show_info("Scatter", msg)
+            self._redraw_overlay()
+            return
 
         self._select_series(sid)
         self._redraw_overlay()
@@ -1751,7 +2521,7 @@ class ChartDigitizerDialog(tk.Toplevel):
         - bar: boundary read (left/right vs baseline) along categorical Y centers
         """
         roi = s.calibration.roi_px
-        tol = int(self.var_tol.get())
+        tol = int(getattr(s, "color_tol", self.var_tol.get()))
         cal = self._build_calibration(s.calibration)
 
         kind = getattr(s, "chart_kind", getattr(s, "mode", "line"))
@@ -1772,8 +2542,11 @@ class ChartDigitizerDialog(tk.Toplevel):
                     tol,
                     seed_px=s.seed_px,
                     seed_bbox_px=s.seed_bbox_px,
-                    template_match_thresh=float(s.calibration.scatter_match_thresh),
+                    seed_bboxes_px=(s.scatter_seed_bboxes_px or None),
+                    template_match_thresh=float(getattr(s, "scatter_match_thresh", self.var_scatter_match_thresh.get())),
+                    use_template_matching=True,
                 )
+                pts_px = [p for p in pts_px if self._mask_allows_point(s, p[0], p[1])]
                 s.px_points = pts_px
                 s.points = [(float(cal.x_px_to_data(x)), float(cal.y_px_to_data(y))) for (x, y) in pts_px]
                 s.point_enabled = [True] * len(s.points)
@@ -1815,8 +2588,14 @@ class ChartDigitizerDialog(tk.Toplevel):
                     grid_px=xpx_grid,
                     seed_px=s.seed_px,
                     seed_bbox_px=s.seed_bbox_px,
-                    template_match_thresh=float(s.calibration.scatter_match_thresh),
+                    seed_bboxes_px=(s.scatter_seed_bboxes_px or None),
+                    template_match_thresh=float(getattr(s, "scatter_match_thresh", self.var_scatter_match_thresh.get())),
                 )
+                for i, ypx in enumerate(ypx_raw):
+                    if ypx is None:
+                        continue
+                    if not self._mask_allows_point(s, int(xpx_grid[i]), int(ypx)):
+                        ypx_raw[i] = None
 
                 y_data_raw: List[Optional[float]] = []
                 for ypx in ypx_raw:
@@ -1879,8 +2658,14 @@ class ChartDigitizerDialog(tk.Toplevel):
                     grid_px=ypx_grid,
                     seed_px=s.seed_px,
                     seed_bbox_px=s.seed_bbox_px,
-                    template_match_thresh=float(s.calibration.scatter_match_thresh),
+                    seed_bboxes_px=(s.scatter_seed_bboxes_px or None),
+                    template_match_thresh=float(getattr(s, "scatter_match_thresh", self.var_scatter_match_thresh.get())),
                 )
+                for i, xpx in enumerate(xpx_raw):
+                    if xpx is None:
+                        continue
+                    if not self._mask_allows_point(s, int(xpx), int(ypx_grid[i])):
+                        xpx_raw[i] = None
 
                 x_data_raw: List[Optional[float]] = []
                 for xpx in xpx_raw:
@@ -1926,6 +2711,8 @@ class ChartDigitizerDialog(tk.Toplevel):
             # if edge collapses (e.g., extremely thin fills), fall back to fill
             if int(edge.sum()) > 0:
                 mask = edge
+
+        mask = self._apply_series_mask_to_roi(s, roi, mask)
 
         def _scan_col_edge(x_local: int, *, prefer_top: bool, y_hint_local: int | None, band: int = 10) -> int | None:
             col = (mask[:, x_local] > 0)
@@ -1993,6 +2780,11 @@ class ChartDigitizerDialog(tk.Toplevel):
                 band_reacq_px=band_reacq_px,
                 max_jump_px=max_jump_px,
             )
+            for i, ypx in enumerate(ypx_raw):
+                if ypx is None:
+                    continue
+                if not self._mask_allows_point(s, int(xpx_grid[i]), int(ypx)):
+                    ypx_raw[i] = None
 
             y_data_raw: List[Optional[float]] = []
             for ypx in ypx_raw:
@@ -2290,19 +3082,24 @@ class ChartDigitizerDialog(tk.Toplevel):
         sel = self.tree.selection()
         if not sel:
             self._active_series_id = None
+            self._sync_mask_controls(None)
         else:
             self._active_series_id = int(sel[0])
-            if self.tool_mode.get() == "editseries":
-                s = self._get_series(self._active_series_id)
-                if s is not None:
+            s = self._get_series(self._active_series_id)
+            if s is not None:
+                if self.tool_mode.get() == "editseries":
                     self._set_ui_mode_from_series(s)
-                    self._apply_series_calibration_to_ui(s.calibration)
+                self._apply_series_calibration_to_ui(s.calibration)
+                self._apply_series_extraction_to_ui(s)
+            self._sync_mask_controls(s)
+            self._update_extraction_controls()
         self._redraw_overlay()
 
     def _select_series(self, sid: int):
         self.tree.selection_set(str(sid))
         self.tree.see(str(sid))
         self._active_series_id = sid
+        self._sync_mask_controls(self._get_series(sid))
 
     def _get_series(self, sid: int) -> Optional[Series]:
         for s in self.series:
@@ -2327,6 +3124,16 @@ class ChartDigitizerDialog(tk.Toplevel):
         self.series = [s for s in self.series if s.id != sid]
         if self.tree.exists(str(sid)):
             self.tree.delete(str(sid))
+        self._active_series_id = None
+        self._sync_mask_controls(None)
+        self._redraw_overlay()
+
+    def _delete_all_series(self):
+        if not self.series:
+            return
+        self.series = []
+        for item in self.tree.get_children(""):
+            self.tree.delete(item)
         self._active_series_id = None
         self._redraw_overlay()
 
@@ -2573,7 +3380,7 @@ class ChartDigitizerDialog(tk.Toplevel):
 
     def _append_csv(self):
         if not self.series:
-            messagebox.showinfo("Append CSV", "No series to export yet. Use 'Add series' first.")
+            self._show_info("Append CSV", "No series to export yet. Use 'Add series' first.")
             return
 
         enabled = [s for s in self.series if s.enabled]
@@ -2592,7 +3399,7 @@ class ChartDigitizerDialog(tk.Toplevel):
         else:
             x_grid, ser = self._prepare_wide_export(enabled)
             if not x_grid or not ser:
-                messagebox.showinfo("Append CSV", "Nothing to export (no valid points).")
+                self._show_info("Append CSV", "Nothing to export (no valid points).")
                 return
             if x_grid and isinstance(x_grid[0], str):
                 x_formatter = None
@@ -2602,12 +3409,12 @@ class ChartDigitizerDialog(tk.Toplevel):
 
     def _export_csv(self):
         if not self.series:
-            messagebox.showinfo("Export CSV", "No series to export yet. Use 'Add series' first.")
+            self._show_info("Export CSV", "No series to export yet. Use 'Add series' first.")
             return
 
         enabled = [s for s in self.series if s.enabled]
         if not enabled:
-            messagebox.showinfo("Export CSV", "All series are disabled.")
+            self._show_info("Export CSV", "All series are disabled.")
             return
 
         path = filedialog.asksaveasfilename(
@@ -2630,13 +3437,13 @@ class ChartDigitizerDialog(tk.Toplevel):
         else:
             x_grid, ser = self._prepare_wide_export(enabled)
             if not x_grid or not ser:
-                messagebox.showinfo("Export CSV", "Nothing to export (no valid points).")
+                self._show_info("Export CSV", "Nothing to export (no valid points).")
                 return
             if x_grid and isinstance(x_grid[0], str):
                 x_formatter = None
             write_wide_csv(path, x_grid, ser, x_formatter=x_formatter)
 
-        messagebox.showinfo("Export CSV", f"Saved:\n{path}")
+        self._show_info("Export CSV", f"Saved:\n{path}")
 
 def _parse_date_safe(s: str, fmt: str) -> float:
     from datetime import datetime, timezone
