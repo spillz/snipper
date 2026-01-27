@@ -24,9 +24,6 @@ def pil_to_bgr(pil_img) -> np.ndarray:
     bgr = arr[..., ::-1].copy()
     return bgr
 
-def bgr_to_rgb(bgr: "np.ndarray") -> "np.ndarray":
-    return bgr[:, :, ::-1]
-
 def color_distance_mask(bgr: np.ndarray, target_bgr: Tuple[int,int,int], tol: int) -> np.ndarray:
     """
     Return a boolean mask where pixels are within tol (0..255) of target_bgr

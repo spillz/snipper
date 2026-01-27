@@ -3,25 +3,13 @@ from __future__ import annotations
 
 from dataclasses import dataclass
 from enum import Enum
-from typing import Optional
-from datetime import datetime, timezone
+from .date_utils import parse_date, format_date
 
 class AxisScale(str, Enum):
     LINEAR = "linear"
     LOG10 = "log10"
     DATE = "date"
     CATEGORICAL = "categorical"
-
-def _parse_date(s: str, fmt: str) -> float:
-    # returns unix seconds (UTC)
-    dt = datetime.strptime(s.strip(), fmt)
-    if dt.tzinfo is None:
-        dt = dt.replace(tzinfo=timezone.utc)
-    return dt.timestamp()
-
-def _format_date(ts: float, fmt: str) -> str:
-    dt = datetime.fromtimestamp(float(ts), tz=timezone.utc)
-    return dt.strftime(fmt)
 
 @dataclass
 class AxisCalibration:
@@ -90,21 +78,21 @@ class Calibration:
 
     def parse_x_value(self, s: str) -> float:
         if self.x.scale == AxisScale.DATE:
-            return _parse_date(s, self.x_date_format)
+            return parse_date(s, self.x_date_format)
         return float(s)
 
     def format_x_value(self, v: float) -> str:
         if self.x.scale == AxisScale.DATE:
-            return _format_date(v, self.x_date_format)
+            return format_date(v, self.x_date_format)
         # Avoid scientific unless needed
         return str(v)
 
     def parse_y_value(self, s: str) -> float:
         if self.y.scale == AxisScale.DATE:
-            return _parse_date(s, self.y_date_format)
+            return parse_date(s, self.y_date_format)
         return float(s)
 
     def format_y_value(self, v: float) -> str:
         if self.y.scale == AxisScale.DATE:
-            return _format_date(v, self.y_date_format)
+            return format_date(v, self.y_date_format)
         return str(v)

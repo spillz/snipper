@@ -1,6 +1,5 @@
 from __future__ import annotations
 
-import calendar
 from datetime import datetime, timezone
 import tkinter as tk
 from tkinter import ttk
@@ -8,11 +7,11 @@ from typing import Callable, List, Optional, Tuple
 
 import numpy as np
 
-from .calibration import AxisScale, Calibration
+from .calibration import AxisScale
 from .cv_utils import require_cv2, color_distance_mask
 from .data_model import Series
+from .date_utils import add_months
 from .extract import (
-    build_x_grid,
     build_x_grid_aligned,
     extract_line_series,
     extract_scatter_series,
@@ -161,18 +160,6 @@ class Extractor:
         self.owner.canvas_actor._redraw_overlay()
 
 
-    def _last_day_of_month(year: int, month: int) -> int:
-        return int(calendar.monthrange(int(year), int(month))[1])
-
-    @classmethod
-    def _add_months(cls, dt: datetime, months: int) -> datetime:
-        total = (dt.year * 12) + (dt.month - 1) + int(months)
-        year = total // 12
-        month = (total % 12) + 1
-        day = min(dt.day, cls._last_day_of_month(year, month))
-        return dt.replace(year=year, month=month, day=day)
-
-
     def _build_date_grid_aligned(
         self,
         xmin_val: float,
@@ -213,15 +200,15 @@ class Extractor:
         delta = xmin_idx - anchor_idx
         k_start = int(delta // months_step)
 
-        cur = self._add_months(anchor_dt, k_start * months_step)
+        cur = add_months(anchor_dt, k_start * months_step)
         while cur < xmin_dt:
             k_start += 1
-            cur = self._add_months(anchor_dt, k_start * months_step)
+            cur = add_months(anchor_dt, k_start * months_step)
 
         xs: List[float] = []
         while cur <= xmax_dt:
             xs.append(cur.timestamp())
-            cur = self._add_months(cur, months_step)
+            cur = add_months(cur, months_step)
 
         return xs
 

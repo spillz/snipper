@@ -33,11 +33,6 @@ class CalibrationConfig:
 
 
 @dataclass
-class PointFlags:
-    enabled: bool = True
-
-
-@dataclass
 class Series:
     id: int
     name: str
@@ -102,6 +97,7 @@ class Series:
 
 @dataclass
 class ChartDocument:
+    # Reserved for future persistence/annotation workflows; keep even if unused today.
     chart_uri: Optional[str] = None
     chart_blob: Optional[bytes] = None
     image_sha256: Optional[str] = None

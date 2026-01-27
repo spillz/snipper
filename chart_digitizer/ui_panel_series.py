@@ -2,7 +2,7 @@ from __future__ import annotations
 
 import tkinter as tk
 from tkinter import ttk, simpledialog
-from typing import Callable, List, Optional, Tuple
+from typing import Callable, Optional
 
 from .data_model import Series
 

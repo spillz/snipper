@@ -1,6 +1,6 @@
 from __future__ import annotations
 
-from datetime import datetime, timezone
+from datetime import datetime
 import tkinter as tk
 from tkinter import ttk
 from typing import Callable, List, Optional, Tuple
@@ -9,6 +9,7 @@ import numpy as np
 
 from .calibration import AxisScale, AxisCalibration, Calibration
 from .data_model import CalibrationConfig, Series
+from .date_utils import parse_date_safe, add_months
 
 
 class CalibrationPanel:
@@ -470,25 +471,6 @@ class Calibrator:
                 self._date_unit_auto = default
 
 
-    @staticmethod
-    def _last_day_of_month(year: int, month: int) -> int:
-        if month == 12:
-            nxt = datetime(year + 1, 1, 1)
-        else:
-            nxt = datetime(year, month + 1, 1)
-        return int((nxt - datetime(year, month, 1)).days)
-
-
-    @classmethod
-    def _add_months(cls, dt: datetime, months: int) -> datetime:
-        if months == 0:
-            return dt
-        year = dt.year + (dt.month - 1 + months) // 12
-        month = (dt.month - 1 + months) % 12 + 1
-        day = min(dt.day, cls._last_day_of_month(year, month))
-        return dt.replace(year=year, month=month, day=day)
-
-
     def _ensure_date_values(self, axis: str = "x") -> None:
         fmt = self.date_fmt.get().strip() or "%Y"
 
@@ -513,7 +495,7 @@ class Calibrator:
             else:
                 self.var_x0_val.set(base.strftime(fmt))
         if not x1 or not _valid_date(x1):
-            x1_dt = self._add_months(base, 12)
+            x1_dt = add_months(base, 12)
             if axis == "y":
                 self.var_y1_val.set(x1_dt.strftime(fmt))
             else:
@@ -923,15 +905,15 @@ class Calibrator:
 
         # Parse X values
         if xs == AxisScale.DATE:
-            x0v = _parse_date_safe(x0v_str or "2000", date_fmt)
-            x1v = _parse_date_safe(x1v_str or "2001", date_fmt)
+            x0v = parse_date_safe(x0v_str or "2000", date_fmt)
+            x1v = parse_date_safe(x1v_str or "2001", date_fmt)
         else:
             x0v = float(x0v_str) if x0v_str else 0.0
             x1v = float(x1v_str) if x1v_str else 1.0
 
         if ys == AxisScale.DATE:
-            y0v = _parse_date_safe(y0v_str or "2000", date_fmt)
-            y1v = _parse_date_safe(y1v_str or "2001", date_fmt)
+            y0v = parse_date_safe(y0v_str or "2000", date_fmt)
+            y1v = parse_date_safe(y1v_str or "2001", date_fmt)
         else:
             y0v = float(y0v_str) if y0v_str else 0.0
             y1v = float(y1v_str) if y1v_str else 1.0
@@ -940,12 +922,3 @@ class Calibrator:
         ycal = AxisCalibration(p0=float(y0_px), p1=float(y1_px), v0=float(y0v), v1=float(y1v), scale=ys)
         return Calibration(x=xcal, y=ycal, x_date_format=date_fmt, y_date_format=date_fmt)
 
-
-def _parse_date_safe(s: str, fmt: str) -> float:
-    s = (s or "").strip()
-    if not s:
-        s = "2000"
-    dt = datetime.strptime(s, fmt)
-    if dt.tzinfo is None:
-        dt = dt.replace(tzinfo=timezone.utc)
-    return dt.timestamp()

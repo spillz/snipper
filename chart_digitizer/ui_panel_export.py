@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import tkinter as tk
 from tkinter import ttk, filedialog
 from typing import Callable, List, Optional, Tuple
 
@@ -29,6 +30,9 @@ class ExportPanel:
         ttk.Button(frame, text="Append CSV", command=on_append_csv).pack(side="left")
         ttk.Button(frame, text="Export CSV...", command=on_export_csv).pack(side="left", padx=(8, 0))
         ttk.Button(frame, text="Close", command=on_close).pack(side="right")
+        frame.update_idletasks()
+        frame.configure(height=frame.winfo_reqheight())
+        frame.pack_propagate(False)
 
 
 class Exporter:

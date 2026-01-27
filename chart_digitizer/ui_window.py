@@ -157,6 +157,13 @@ class ChartDigitizerWindow(tk.Toplevel):
             on_clear_mask=self.canvas_actor._clear_mask,
             on_rerun_extraction=self.extractor._rerun_active_series,
         )
+        self.export_panel = ExportPanel(
+            self,
+            right,
+            on_append_csv=self.exporter._append_csv,
+            on_export_csv=self.exporter._export_csv,
+            on_close=self.destroy,
+        )
         self.series_panel = SeriesPanel(
             self,
             right,
@@ -165,13 +172,6 @@ class ChartDigitizerWindow(tk.Toplevel):
             on_delete_all=self.series_actor._delete_all_series,
             on_select=self.series_actor._on_tree_select,
             on_rename=self.series_actor._on_tree_double_click,
-        )
-        self.export_panel = ExportPanel(
-            self,
-            right,
-            on_append_csv=self.exporter._append_csv,
-            on_export_csv=self.exporter._export_csv,
-            on_close=self.destroy,
         )
 
         self.after(0, self._set_default_pane_ratio)
@@ -184,6 +184,7 @@ class ChartDigitizerWindow(tk.Toplevel):
         self.var_scatter_match_thresh.trace_add("write", lambda *_: self.extractor._on_extraction_setting_change())
         if getattr(self, "_right_panel", None) is not None:
             self._right_panel.bind("<Configure>", self._on_right_panel_configure)
+        self.after(0, self._update_series_list_height)
         self._bind_tab_order(self.calibration_panel.frame)
 
     def _bind_tab_order(self, container: ttk.Frame) -> None:
@@ -269,6 +270,7 @@ class ChartDigitizerWindow(tk.Toplevel):
             return
         if not getattr(self, "_tree_rowheight", None):
             return
+        self._right_panel.update_idletasks()
         total = int(self._right_panel.winfo_height())
         if total <= 0:
             return
@@ -279,10 +281,13 @@ class ChartDigitizerWindow(tk.Toplevel):
                     getattr(self, "_series_btns_frame", None)):
             if frm is None:
                 continue
-            fixed += int(frm.winfo_height())
+            h = int(frm.winfo_height())
+            req = int(frm.winfo_reqheight())
+            fixed += max(h, req)
         available = max(0, total - fixed - 40)
         rows = max(3, int(available / max(1, int(self._tree_rowheight))))
         self.tree.configure(height=rows)
+        self._series_frame.pack_propagate(True)
 
     def _on_series_mode_change(self):
         if getattr(self, "_suppress_series_mode_change", False):
