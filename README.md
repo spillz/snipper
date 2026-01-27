@@ -39,29 +39,7 @@ Tesseract must be installed separately (pytessseract is just a binding). On Wind
 python snipper.py
 ```
 
-## Running with UV
-
-Use uv to replace pip, venv, and pip-tools with a single, extremely fast tool that creates fully reproducible Python environments in seconds.
-
-```bash
-uv venv
-uv pip install -e .
-uv run python snipper.py
-```
-
-You can create Windows builds with PyInstaller and UV using the following commands for a single-file executable:
-
-```bash
-uv pip install -e .[build]
-.\build_windows.ps1 -OneFile
-```
-
-Or replace -OneFile with OneDirSfx for an installable MSI (requires WiX Toolset v3.x). Use -WixPath if WiX is not on PATH (for example `-WixPath "C:\\Program Files (x86)\\WiX Toolset v3.11\\bin"`).
-
-## Versioning and changelog
-
-- Version lives in `VERSION` and is embedded into the Windows EXE.
-- Release notes live in `CHANGELOG.md`.
+See additional notes for running in UV and compiling your own binaries below.
 
 ## Text snipping workflow
 
@@ -109,3 +87,25 @@ Or replace -OneFile with OneDirSfx for an installable MSI (requires WiX Toolset 
 Notes:
 - Line charts export in **wide** format with a shared x-index.
 - Scatter charts export in **long** format of stacked series with x,y pairs.
+
+## Running with UV and Building Binaries
+
+Use uv to replace pip, venv, and pip-tools with a single, extremely fast tool that creates reproducible Python environments (Python's answer to node.js).
+
+```bash
+uv venv
+uv pip install -e .
+uv run python snipper.py
+```
+
+You can create Windows builds with PyInstaller and UV using the following commands for a single-file executable:
+
+```bash
+uv pip install -e .[build]
+.\build_windows.ps1 -OneFile
+```
+
+Replace -OneFile with -OneDirSfx for an installable MSI (requires WiX Toolset v3.x). Use -WixPath if WiX is not on PATH (for example `-WixPath "C:\\Program Files (x86)\\WiX Toolset v3.11\\bin"`).
+
+Version lives in `VERSION` and is embedded into the Windows EXE. Release notes live in `CHANGELOG.md`.
+
