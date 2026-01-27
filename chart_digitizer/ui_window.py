@@ -71,7 +71,7 @@ class ChartDigitizerWindow(tk.Toplevel):
         self.var_x_step_unit = tk.StringVar(value="days")
         self.var_y_step = tk.DoubleVar(value=1.0)
         self.var_y_step_unit = tk.StringVar(value="days")
-        self.var_tol = tk.IntVar(value=20)
+        self.var_tol = tk.IntVar(value=60)
         self.var_sample_mode = tk.StringVar(value="Free")
         self.var_scatter_match_thresh = tk.DoubleVar(value=0.6)
         self.var_auto_rerun = tk.BooleanVar(value=False)
@@ -105,6 +105,20 @@ class ChartDigitizerWindow(tk.Toplevel):
 
         # axis click staging
         self._pending_axis: Optional[str] = None  # 'x0','x1','y0','y1' progress
+        self._axis_drag_start: Optional[Tuple[int, int]] = None
+        self._axis_dragging: bool = False
+        self._axis_drag_axis: Optional[str] = None  # "x" or "y"
+        self._axis_drag_active: bool = False
+        self._axis_drag_threshold = 3
+        self._nudge_target: Optional[str] = None  # roi_tl|roi_tr|roi_bl|roi_br|x0|x1|y0|y1
+        self._axis_label_pos: dict[str, Tuple[int, int]] = {}
+        self._axis_label_bboxes: dict[str, Tuple[int, int, int, int]] = {}
+        self._axis_label_drag: Optional[str] = None
+        self._seed_drag: Optional[Tuple[int, str, int]] = None  # (series_id, kind, index)
+        self._seed_drag_start: Optional[Tuple[int, int]] = None
+        self._last_mouse_canvas: Optional[Tuple[int, int]] = None
+        self._roi_resize_corner: Optional[str] = None
+        self._roi_resize_anchor: Optional[Tuple[int, int]] = None
 
         self._build_ui()
         self._on_series_mode_change()

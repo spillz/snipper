@@ -52,7 +52,7 @@ class Series:
     # Prefer outline/edge pixels (often optimal for bar/area/column charts).
     prefer_outline: bool = True
     # Per-series color tolerance.
-    color_tol: int = 20
+    color_tol: int = 60
     # Per-series scatter template match threshold.
     scatter_match_thresh: float = 0.6
 
