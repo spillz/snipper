@@ -72,15 +72,21 @@ See additional notes for running in UV and compiling your own binaries below.
    - Click on the individual series in the Series list
    - Drag points vertically (line mode) to adjust values.
    - Right-click a point to toggle NA (disabled).
-5. Toolbar: change tool to **Mask series** (optional)
+5. Keyboard and fine control:
+   - Arrow keys nudge the active item in the canvas (a region corner, axis tick, point, or seed).
+   - Shift+arrow moves faster; Ctrl+arrow switches which item is active.
+   - Enter / Shift+Enter switches tools forward/backward.
+   - You can drag the tick labels in **Set X axis** / **Set Y axis** to move the tick positions.
+   - You can drag seed markers in **Add series** / **Edit series** to move the seed and re-extract.
+6. Toolbar: change tool to **Mask series** (optional)
    - Draw a mask if detection is noisy or misses points; use Invert to exclude/include regions.
    - Re-run extraction after masking if Auto rerun is off.
-6. Series list
+7. Series list
    - Click series to change the active series
    - Double click on series to change names
    - Delete to drop the series (easy to add again via the "add series" tool)
    - "Toggle on/off" to off excludes from notebook append or CSV export
-7. Export:
+8. Export:
    - **Append CSV** appends to the notepad in the main window.
    - **Export CSV...** saves a CSV file.
 
