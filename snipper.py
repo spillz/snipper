@@ -31,7 +31,7 @@ import pytesseract
 from pytesseract import Output
 from PIL import Image, ImageTk, ImageOps, ImageFilter
 
-from chart_digitizer.ui_dialog import ChartDigitizerDialog
+from chart_digitizer.ui_window import ChartDigitizerWindow
 
 import ctypes
 
@@ -1074,7 +1074,7 @@ class SnipOCRApp(tk.Tk):
 
     def start_snip_chart(self):
         """
-        Screen snip → open modeless ChartDigitizerDialog → append CSV into notepad on demand.
+        Screen snip → open modeless ChartDigitizerWindow → append CSV into notepad on demand.
         """
         self.set_status("Capturing screen…")
         with mss.mss() as sct:
@@ -1102,7 +1102,7 @@ class SnipOCRApp(tk.Tk):
                 self.set_status("Chart CSV appended.")
 
             try:
-                dlg = ChartDigitizerDialog(self, image=cropped, on_append_text=append_text)
+                dlg = ChartDigitizerWindow(self, image=cropped, on_append_text=append_text)
                 self.register_dialog(dlg)
                 self.set_status("Chart digitizer opened.")
             except Exception as e:
