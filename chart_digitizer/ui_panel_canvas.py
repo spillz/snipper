@@ -35,6 +35,7 @@ class CanvasPanel:
         owner.tip_var = tk.StringVar(value="")
         owner.tip_label = ttk.Label(loupe_frm, textvariable=owner.tip_var, wraplength=900, justify="left")
         owner.tip_label.pack(side="left", padx=(10, 0), fill="x", expand=True)
+        owner.tip_measure = ttk.Label(loupe_frm, text="", wraplength=900, justify="left")
 
         owner.canvas = tk.Canvas(frame, background="#111", highlightthickness=1, highlightbackground="#333")
         owner.canvas.configure(takefocus=1)
@@ -84,19 +85,30 @@ class CanvasActor:
                 pass
         self._render_after_id = self.after(30, self._render_image)
 
+    def _on_left_panel_configure(self, event):
+        w, h = int(event.width), int(event.height)
+        if getattr(self, "_last_left_size", None) == (w, h):
+            return
+        self._last_left_size = (w, h)
+        self._update_tip()
+
     def _set_tip_text(self, text: str, short_text: Optional[str] = None) -> None:
         if not getattr(self, "tip_label", None):
             self.tip_var.set(text)
             return
+
         self.tip_label.update_idletasks()
         wrap_px = int(max(120, self.tip_label.winfo_width()))
         self.tip_label.configure(wraplength=wrap_px)
-        self.tip_var.set(text)
-        self.tip_label.update_idletasks()
         if short_text:
             max_h = int(self.loupe.winfo_height()) if getattr(self, "loupe", None) else 0
-            if max_h > 0 and self.tip_label.winfo_reqheight() > max_h:
-                self.tip_var.set(short_text)
+            if max_h > 0 and getattr(self, "tip_measure", None) is not None:
+                self.tip_measure.configure(wraplength=wrap_px, text=text)
+                self.tip_measure.update_idletasks()
+                if self.tip_measure.winfo_reqheight() > max_h:
+                    self.tip_var.set(short_text)
+                    return
+        self.tip_var.set(text)
 
 
 
@@ -135,21 +147,21 @@ class CanvasActor:
         self._axis_label_bboxes = {}
 
         mode = self.tool_mode.get()
-        show_roi = (mode == "roi")
+        show_data_region = (mode == "data_region")
         show_x = (mode == "xaxis")
         show_y = (mode == "yaxis")
         show_mask = (mode == "mask")
         show_series = mode in ("addseries", "editseries")
         show_seeds = mode in ("addseries", "editseries")
 
-        # ROI rectangle + handles
-        x0, y0, x1, y1 = self._roi_px()
+        # Data region rectangle + handles
+        x0, y0, x1, y1 = self._data_region_px()
         ax0, ay0 = self._to_canvas(x0, y0)
         ax1, ay1 = self._to_canvas(x1, y1)
-        if show_roi:
+        if show_data_region:
             self.canvas.create_rectangle(ax0, ay0, ax1, ay1, outline="black", width=4, tags=("overlay",))
             self.canvas.create_rectangle(ax0, ay0, ax1, ay1, outline="#2D9CDB", width=2, tags=("overlay",))
-            self._draw_roi_handles(x0, y0, x1, y1)
+            self._draw_data_region_handles(x0, y0, x1, y1)
 
         # Axis markers
         x0_px, x1_px = self._x_axis_px()
@@ -284,7 +296,7 @@ class CanvasActor:
         self._mask_photo = ImageTk.PhotoImage(disp)
         self.canvas.create_image(self._offx, self._offy, image=self._mask_photo, anchor="nw", tags=("overlay", "mask"))
 
-    def _draw_roi_handles(self, x0: int, y0: int, x1: int, y1: int) -> None:
+    def _draw_data_region_handles(self, x0: int, y0: int, x1: int, y1: int) -> None:
         size = 12
         active = self._nudge_target or ""
         base_fill = "#1E5AA8"
@@ -294,18 +306,18 @@ class CanvasActor:
             fill = active_fill if active == key else base_fill
             pts = [self._to_canvas(px, py) for (px, py) in points]
             flat = [v for xy in pts for v in xy]
-            self.canvas.create_polygon(*flat, fill=fill, outline="black", width=1, tags=("overlay", "roi_handle"))
+            self.canvas.create_polygon(*flat, fill=fill, outline="black", width=1, tags=("overlay", "data_region_handle"))
 
-        _tri([(x0, y0), (x0 + size, y0), (x0, y0 + size)], "roi_tl")
-        _tri([(x1, y0), (x1 - size, y0), (x1, y0 + size)], "roi_tr")
-        _tri([(x0, y1), (x0 + size, y1), (x0, y1 - size)], "roi_bl")
-        _tri([(x1, y1), (x1 - size, y1), (x1, y1 - size)], "roi_br")
+        _tri([(x0, y0), (x0 + size, y0), (x0, y0 + size)], "data_region_tl")
+        _tri([(x1, y0), (x1 - size, y0), (x1, y0 + size)], "data_region_tr")
+        _tri([(x0, y1), (x0 + size, y1), (x0, y1 - size)], "data_region_bl")
+        _tri([(x1, y1), (x1 - size, y1), (x1, y1 - size)], "data_region_br")
 
     def _tick_label_pos(self, key: str, xpx: int, ypx: int, *, line_axis: str) -> Tuple[int, int]:
         pos = self._axis_label_pos.get(key)
         if pos is not None:
             return pos
-        rx0, ry0, _, _ = self._roi_px()
+        rx0, ry0, _, _ = self._data_region_px()
         if line_axis == "x":
             return (int(xpx + 6), int(ry0 + 6))
         return (int(rx0 + 6), int(ypx + 6))
@@ -364,18 +376,18 @@ class CanvasActor:
         return x, y
 
 
-    def _roi_px(self) -> Tuple[int,int,int,int]:
+    def _data_region_px(self) -> Tuple[int,int,int,int]:
         return (self.state.xmin_px, self.state.ymin_px, self.state.xmax_px, self.state.ymax_px)
 
 
     def _x_axis_px(self) -> Tuple[int,int]:
-        x0,y0,x1,y1 = self._roi_px()
+        x0,y0,x1,y1 = self._data_region_px()
         return (self.state.x0_px if self.state.x0_px is not None else x0,
                 self.state.x1_px if self.state.x1_px is not None else x1)
 
 
     def _y_axis_px(self) -> Tuple[int,int]:
-        x0,y0,x1,y1 = self._roi_px()
+        x0,y0,x1,y1 = self._data_region_px()
         return (self.state.y0_px if self.state.y0_px is not None else y1,   # y0 defaults to bottom
                 self.state.y1_px if self.state.y1_px is not None else y0)   # y1 defaults to top
 
@@ -490,10 +502,10 @@ class CanvasActor:
     def _apply_series_point_nudge(self, s: Series, idx: int, dx: int, dy: int) -> None:
         if idx < 0 or idx >= len(s.px_points):
             return
-        roi_x0, roi_y0, roi_x1, roi_y1 = self._roi_px()
+        data_region_x0, data_region_y0, data_region_x1, data_region_y1 = self._data_region_px()
         xpx, ypx = s.px_points[idx]
-        xpx = max(roi_x0, min(roi_x1, int(xpx + dx)))
-        ypx = max(roi_y0, min(roi_y1, int(ypx + dy)))
+        xpx = max(data_region_x0, min(data_region_x1, int(xpx + dx)))
+        ypx = max(data_region_y0, min(data_region_y1, int(ypx + dy)))
         cal = self.owner.calibrator._build_calibration()
 
         if s.mode in ("line", "column", "area"):
@@ -532,8 +544,8 @@ class CanvasActor:
     def _collect_interactable_targets(self) -> List[str]:
         mode = self.tool_mode.get()
         targets: List[str] = []
-        if mode == "roi":
-            targets = ["roi_tl", "roi_tr", "roi_br", "roi_bl"]
+        if mode == "data_region":
+            targets = ["data_region_tl", "data_region_tr", "data_region_br", "data_region_bl"]
         elif mode == "xaxis":
             targets = ["x0", "x1"]
         elif mode == "yaxis":
@@ -569,7 +581,7 @@ class CanvasActor:
         self._center_loupe_on_target(targets[idx])
 
     def _cycle_tool(self, *, forward: bool) -> None:
-        tools = ["roi", "xaxis", "yaxis", "addseries", "editseries", "mask"]
+        tools = ["data_region", "xaxis", "yaxis", "addseries", "editseries", "mask"]
         cur = self.tool_mode.get()
         if cur not in tools:
             return
@@ -578,13 +590,13 @@ class CanvasActor:
         self.tool_mode.set(tools[idx])
         self.owner._on_tool_change()
 
-    def _nearest_roi_corner(self, xpx: int, ypx: int, *, radius: int = 8) -> Optional[str]:
-        x0, y0, x1, y1 = self._roi_px()
+    def _nearest_data_region_corner(self, xpx: int, ypx: int, *, radius: int = 8) -> Optional[str]:
+        x0, y0, x1, y1 = self._data_region_px()
         corners = {
-            "roi_tl": (x0, y0),
-            "roi_tr": (x1, y0),
-            "roi_bl": (x0, y1),
-            "roi_br": (x1, y1),
+            "data_region_tl": (x0, y0),
+            "data_region_tr": (x1, y0),
+            "data_region_bl": (x0, y1),
+            "data_region_br": (x1, y1),
         }
         best = None
         bestd = 1e18
@@ -596,12 +608,12 @@ class CanvasActor:
                 bestd = d2
         return best
 
-    def _apply_roi_corner_nudge(self, corner: str, dx: int, dy: int) -> None:
-        x0, y0, x1, y1 = self._roi_px()
-        move_x0 = corner in ("roi_tl", "roi_bl")
-        move_x1 = corner in ("roi_tr", "roi_br")
-        move_y0 = corner in ("roi_tl", "roi_tr")
-        move_y1 = corner in ("roi_bl", "roi_br")
+    def _apply_data_region_corner_nudge(self, corner: str, dx: int, dy: int) -> None:
+        x0, y0, x1, y1 = self._data_region_px()
+        move_x0 = corner in ("data_region_tl", "data_region_bl")
+        move_x1 = corner in ("data_region_tr", "data_region_br")
+        move_y0 = corner in ("data_region_tl", "data_region_tr")
+        move_y1 = corner in ("data_region_bl", "data_region_br")
         if move_x0:
             x0 += dx
         if move_x1:
@@ -666,22 +678,22 @@ class CanvasActor:
     def _target_px(self, target: str) -> Optional[Tuple[int, int]]:
         if not target:
             return None
-        if target.startswith("roi_"):
-            x0, y0, x1, y1 = self._roi_px()
+        if target.startswith("data_region_"):
+            x0, y0, x1, y1 = self._data_region_px()
             return {
-                "roi_tl": (x0, y0),
-                "roi_tr": (x1, y0),
-                "roi_bl": (x0, y1),
-                "roi_br": (x1, y1),
+                "data_region_tl": (x0, y0),
+                "data_region_tr": (x1, y0),
+                "data_region_bl": (x0, y1),
+                "data_region_br": (x1, y1),
             }.get(target)
         if target in ("x0", "x1"):
             x0_px, x1_px = self._x_axis_px()
-            y0, y1 = self._roi_px()[1], self._roi_px()[3]
+            y0, y1 = self._data_region_px()[1], self._data_region_px()[3]
             y_mid = int(round((y0 + y1) / 2))
             return (int(x0_px), y_mid) if target == "x0" else (int(x1_px), y_mid)
         if target in ("y0", "y1"):
             y0_px, y1_px = self._y_axis_px()
-            x0, x1 = self._roi_px()[0], self._roi_px()[2]
+            x0, x1 = self._data_region_px()[0], self._data_region_px()[2]
             x_mid = int(round((x0 + x1) / 2))
             return (x_mid, int(y0_px)) if target == "y0" else (x_mid, int(y1_px))
         if target.startswith("pt:"):
@@ -782,10 +794,10 @@ class CanvasActor:
                 self._show_error("Series extraction failed", str(e))
                 return
             self.owner.series_actor._update_tree_row(s)
-        elif target.startswith("roi_"):
-            if mode != "roi":
+        elif target.startswith("data_region_"):
+            if mode != "data_region":
                 return
-            self._apply_roi_corner_nudge(target, dx, dy)
+            self._apply_data_region_corner_nudge(target, dx, dy)
         elif target in ("x0", "x1"):
             if mode != "xaxis" or dx == 0:
                 return
@@ -837,26 +849,26 @@ class CanvasActor:
                     self._set_nudge_target(seed_target)
                     return
 
-        if mode == "roi":
-            corner = self._nearest_roi_corner(xpx, ypx)
+        if mode == "data_region":
+            corner = self._nearest_data_region_corner(xpx, ypx)
             if corner is not None:
                 self._set_nudge_target(corner)
-                self._roi_resize_corner = corner
-                rx0, ry0, rx1, ry1 = self._roi_px()
+                self._data_region_resize_corner = corner
+                rx0, ry0, rx1, ry1 = self._data_region_px()
                 opp = {
-                    "roi_tl": (rx1, ry1),
-                    "roi_tr": (rx0, ry1),
-                    "roi_bl": (rx1, ry0),
-                    "roi_br": (rx0, ry0),
+                    "data_region_tl": (rx1, ry1),
+                    "data_region_tr": (rx0, ry1),
+                    "data_region_bl": (rx1, ry0),
+                    "data_region_br": (rx0, ry0),
                 }[corner]
-                self._roi_resize_anchor = opp
+                self._data_region_resize_anchor = opp
                 self._redraw_overlay()
             else:
-                self._roi_resize_corner = None
-                self._roi_resize_anchor = None
-            self._roi_drag_start = (xpx, ypx)
-            self._roi_dragging = True
-            self._roi_drag_moved = False
+                self._data_region_resize_corner = None
+                self._data_region_resize_anchor = None
+            self._data_region_drag_start = (xpx, ypx)
+            self._data_region_dragging = True
+            self._data_region_drag_moved = False
             return
 
         if mode == "xaxis":
@@ -978,20 +990,20 @@ class CanvasActor:
                 self._redraw_overlay()
                 self._draw_loupe(xpx, ypx)
             return
-        if mode == "roi" and getattr(self, "_roi_dragging", False):
-            if self._roi_resize_corner and self._roi_resize_anchor:
-                sx, sy = self._roi_resize_anchor
+        if mode == "data_region" and getattr(self, "_data_region_dragging", False):
+            if self._data_region_resize_corner and self._data_region_resize_anchor:
+                sx, sy = self._data_region_resize_anchor
                 x0 = min(sx, xpx); x1 = max(sx, xpx)
                 y0 = min(sy, ypx); y1 = max(sy, ypx)
             else:
-                sx, sy = self._roi_drag_start
+                sx, sy = self._data_region_drag_start
                 x0 = min(sx, xpx); x1 = max(sx, xpx)
                 y0 = min(sy, ypx); y1 = max(sy, ypx)
 
             # enforce min size
             if (x1-x0) >= 5 and (y1-y0) >= 5:
                 self.state.xmin_px, self.state.ymin_px, self.state.xmax_px, self.state.ymax_px = x0, y0, x1, y1
-                self._roi_drag_moved = True
+                self._data_region_drag_moved = True
             self._redraw_overlay()
             self._draw_loupe(xpx, ypx)
             return
@@ -1002,9 +1014,9 @@ class CanvasActor:
             if not s:
                 return
 
-            roi_x0, roi_y0, roi_x1, roi_y1 = self._roi_px()
-            xpx = max(roi_x0, min(roi_x1, xpx))
-            ypx = max(roi_y0, min(roi_y1, ypx))
+            data_region_x0, data_region_y0, data_region_x1, data_region_y1 = self._data_region_px()
+            xpx = max(data_region_x0, min(data_region_x1, xpx))
+            ypx = max(data_region_y0, min(data_region_y1, ypx))
 
             cal = self.owner.calibrator._build_calibration()
 
@@ -1120,24 +1132,24 @@ class CanvasActor:
             self._axis_drag_start = None
             self._redraw_overlay()
             return
-        if self.tool_mode.get() == "roi":
-            if self._roi_drag_start is not None:
+        if self.tool_mode.get() == "data_region":
+            if self._data_region_drag_start is not None:
                 xpx, ypx = self._to_image_px(event.x, event.y)
-                sx, sy = self._roi_drag_start
-                if getattr(self, "_roi_drag_moved", False):
-                    corner = "roi_br"
+                sx, sy = self._data_region_drag_start
+                if getattr(self, "_data_region_drag_moved", False):
+                    corner = "data_region_br"
                     if xpx < sx and ypx < sy:
-                        corner = "roi_tl"
+                        corner = "data_region_tl"
                     elif xpx >= sx and ypx < sy:
-                        corner = "roi_tr"
+                        corner = "data_region_tr"
                     elif xpx < sx and ypx >= sy:
-                        corner = "roi_bl"
+                        corner = "data_region_bl"
                     self._set_nudge_target(corner)
-            self._roi_dragging = False
-            self._roi_drag_start = None
-            self._roi_drag_moved = False
-            self._roi_resize_corner = None
-            self._roi_resize_anchor = None
+            self._data_region_dragging = False
+            self._data_region_drag_start = None
+            self._data_region_drag_moved = False
+            self._data_region_resize_corner = None
+            self._data_region_resize_anchor = None
 
         # If we were dragging a scatter point, resequence by ascending X on release.
         if self.tool_mode.get() == "editseries" and self._active_series_id is not None and self._drag_series_mode == "scatter":
@@ -1323,9 +1335,9 @@ class CanvasActor:
             if s.mode != "scatter":
                 return
 
-            roi_x0, roi_y0, roi_x1, roi_y1 = self._roi_px()
-            xpx = max(roi_x0, min(roi_x1, xpx))
-            ypx = max(roi_y0, min(roi_y1, ypx))
+            data_region_x0, data_region_y0, data_region_x1, data_region_y1 = self._data_region_px()
+            xpx = max(data_region_x0, min(data_region_x1, xpx))
+            ypx = max(data_region_y0, min(data_region_y1, ypx))
 
             cal = self.owner.calibrator._build_calibration()
             x_data = float(cal.x_px_to_data(xpx))
@@ -1478,11 +1490,11 @@ class CanvasActor:
         return allowed
 
 
-    def _apply_series_mask_to_roi(self, s: Series, roi: Tuple[int, int, int, int], mask: np.ndarray) -> np.ndarray:
+    def _apply_series_mask_to_data_region(self, s: Series, data_region: Tuple[int, int, int, int], mask: np.ndarray) -> np.ndarray:
         series_mask = getattr(s, "mask_bitmap", None)
         if series_mask is None:
             return mask
-        x0, y0, x1, y1 = roi
+        x0, y0, x1, y1 = data_region
         x0 = max(0, min(self._iw, int(x0)))
         x1 = max(0, min(self._iw, int(x1)))
         y0 = max(0, min(self._ih, int(y0)))
@@ -1661,7 +1673,7 @@ class CanvasActor:
 
         # overlays (drawn smaller than background scale)
         mode = self.tool_mode.get()
-        show_roi = (mode == "roi")
+        show_data_region = (mode == "data_region")
         show_x = (mode == "xaxis")
         show_y = (mode == "yaxis")
         show_series = mode in ("addseries", "editseries")
@@ -1672,15 +1684,15 @@ class CanvasActor:
         def to_loupe(ix: int, iy: int) -> Tuple[int, int]:
             return (int((ix - x0) * zoom), int((iy - y0) * zoom))
 
-        if show_roi:
-            rx0, ry0, rx1, ry1 = self._roi_px()
+        if show_data_region:
+            rx0, ry0, rx1, ry1 = self._data_region_px()
             lx0, ly0 = to_loupe(rx0, ry0)
             lx1, ly1 = to_loupe(rx1, ry1)
             self.loupe.create_rectangle(lx0, ly0, lx1, ly1, outline="#2D9CDB", width=lw)
 
         if show_x:
             x0_px, x1_px = self._x_axis_px()
-            ry0, ry1 = self._roi_px()[1], self._roi_px()[3]
+            ry0, ry1 = self._data_region_px()[1], self._data_region_px()[3]
             for xpx_line in (x0_px, x1_px):
                 lx, ly0 = to_loupe(xpx_line, ry0)
                 _, ly1 = to_loupe(xpx_line, ry1)
@@ -1688,7 +1700,7 @@ class CanvasActor:
 
         if show_y:
             y0_px, y1_px = self._y_axis_px()
-            rx0, rx1 = self._roi_px()[0], self._roi_px()[2]
+            rx0, rx1 = self._data_region_px()[0], self._data_region_px()[2]
             for ypx_line in (y0_px, y1_px):
                 lx0, ly = to_loupe(rx0, ypx_line)
                 lx1, _ = to_loupe(rx1, ypx_line)
@@ -1883,14 +1895,14 @@ class CanvasActor:
         std = float(flat.std())
         if np.max(rng) > 2.0 or std > 1.0:
             return False
-        roi = self._roi_px()
-        rx0, ry0, rx1, ry1 = roi
-        roi_patch = self._bgr[ry0:ry1, rx0:rx1, :]
-        if not roi_patch.size:
+        data_region = self._data_region_px()
+        rx0, ry0, rx1, ry1 = data_region
+        data_region_patch = self._bgr[ry0:ry1, rx0:rx1, :]
+        if not data_region_patch.size:
             return True
-        roi_med = np.median(roi_patch.reshape(-1, 3).astype(np.float32), axis=0)
+        data_region_med = np.median(data_region_patch.reshape(-1, 3).astype(np.float32), axis=0)
         patch_med = np.median(flat, axis=0)
-        dist = float(np.linalg.norm(patch_med - roi_med))
+        dist = float(np.linalg.norm(patch_med - data_region_med))
         tol = float(self.var_tol.get())
         return dist <= max(5.0, tol)
 
@@ -2016,107 +2028,92 @@ class CanvasActor:
         mode = self.tool_mode.get()
         series_mode = self.series_mode.get()  # line|scatter|column|bar|area
 
-        if mode == "roi":
+        if mode == "data_region":
             msg = (
-                "Set data region: Click and drag to define the rectangular region of interest (ROI). "
-                "Only pixels inside this region are scanned for the series by their color. "
-                "If you do not set tick pixels, tick positions default to the region edges. "
-                "Click a corner handle to select it, then use arrow keys to nudge (Shift+arrow = 10px). "
-                "Ctrl+arrow cycles between handles."
+                "Drag a box around the chart area you want to read. "
+                "If you skip this, the tool uses the whole image. "
+                "Use arrow keys to nudge the active corner. Shift+arrow moves faster; Ctrl+arrow cycles the active corner."
             )
-            short_msg = "Set date region: drag a rectangle with mouse. Nudge corners with mouse or arrows (Shift+arrow=10px)."
+            short_msg = "Data region: drag a box; arrows fine-tune corners."
         elif mode == "xaxis":
             msg = (
-                "Set X ticks: Click any two tick positions on the vertical axis. "
-                "Then enter their values in the Calibration panel (x0 and x1) to the right. "
-                "These ticks define the mapping from image pixels to chart units for the X axis. "
-                "Drag to set x0 then x1, or drag the label boxes to move a tick. "
-                "Use arrow keys to nudge the active tick (Shift+arrow = 10px, Ctrl+arrow cycles)."
+                "Click two tick marks on the X axis. "
+                "Type their values into x0 and x1. "
+                "Use arrow keys to nudge the active tick. Shift+arrow moves faster; Ctrl+arrow cycles the active tick."
             )
-            short_msg = "Set X ticks: click two x-axis tick positions, then enter x0/x1."
+            short_msg = "X ticks: click two ticks, then enter x0/x1."
         elif mode == "yaxis":
             msg = (
-                "Set Y ticks: Click any two tick positions on the vertical axis. "
-                "Then enter their values in the Calibration panel (y0 and y1) to the right. "
-                "These ticks define the mapping from image pixels to chart units for the Y axis. "
-                "Drag to set y0 then y1, or drag the label boxes to move a tick. "
-                "Use arrow keys to nudge the active tick (Shift+arrow = 10px, Ctrl+arrow cycles)."
+                "Click two tick marks on the Y axis. "
+                "Type their values into y0 and y1. "
+                "Use arrow keys to nudge the active tick. Shift+arrow moves faster; Ctrl+arrow cycles the active tick."
             )
-            short_msg = "Set Y ticks: click two y-axis tick positions, then enter y0/y1."
+            short_msg = "Y ticks: click two ticks, then enter y0/y1."
         elif mode == "addseries":
             if series_mode == "scatter":
                 msg = (
-                    "Add series (Scatter): Click a colored scatter point to extract all matching solid, single-color markers. "
-                    "Drag a rectangle around a scatter point to use shape-based template matching for tougher cases. "
-                    "Ctrl+click adds a seed; Ctrl+drag adds more shape templates. "
-                    "Drag seed markers to reposition and re-extract. Ctrl+arrow cycles active seeds."
+                    "Click a marker color to find simple, solid markers. "
+                    "If markers are tricky, drag a box around one marker so the tool can match its shape. "
+                    "Ctrl+click adds extra guide points if the first pass misses some. "
+                    "Hold Ctrl while dragging to add another shape to the same series."
                 )
-                short_msg = "Scatter: click color; drag for template; Ctrl+click adds seeds; Ctrl+drag adds template."
+                short_msg = "Scatter: click color; drag template; Ctrl+click adds seeds."
             elif series_mode == "line":
                 msg = (
-                    "Add series (Line): Click directly on a line in the chart to generate the series data. "
-                    "Calibration and extraction parameters affect extraction results."
-                    "Ctrl+click adds detection seeds (shown as cyan rings) to improve extractions. "
-                    "Drag seed markers to reposition and re-extract. Ctrl+arrow cycles active seeds."
+                    "Click directly on the line you want to capture. "
+                    "The tool follows that line across the chart and records points for you. "
+                    "If it loses the line, you can add extra guide points with Ctrl+click."
                 )
-                short_msg = "Line: click the line; Ctrl+click adds seeds; drag seeds to re-extract."
+                short_msg = "Line: click line; Ctrl+click adds seeds."
             elif series_mode == "column":
                 msg = (
-                    "Add series (Column): Click inside a bar segment to match columns of similar color. "
-                    "The tool reads the bar boundary (usually the outline) to estimate the value. "
-                    "Set X scale to categorical to auto-detect bar centers; otherwise samples on the X grid. "
-                    "Ctrl+click adds detection seeds (shown as cyan rings) to guide edge selection; drag seeds to adjust. "
-                    "Stacked indicates the series is a cumulative boundary; export can emit deltas between boundaries."
+                    "Click inside a vertical bar to choose its color. "
+                    "The tool reads the bar's edge to get the value. "
+                    "Ctrl+click adds guide points if bars overlap or get missed."
                 )
-                short_msg = "Column: click a bar; Ctrl+click adds seeds to guide edge selection."
+                short_msg = "Column: click bar; Ctrl+click adds seeds."
             elif series_mode == "bar":
                 msg = (
-                    "Add series (Bar): Click inside a horizontal bar segment to pick its color. "
-                    "The tool reads the bar boundary (usually the outline) to estimate the value. "
-                    "Set Y scale to categorical to auto-detect bar centers along Y. "
-                    "Ctrl+click adds detection seeds (shown as cyan rings) to guide extraction; drag/arrow to adjust seeds. "
-                    "Stacked indicates the series is a cumulative boundary; export can emit deltas between boundaries."
+                    "Click inside a horizontal bar to choose its color. "
+                    "The tool reads the bar's edge to get the value. "
+                    "Ctrl+click adds guide points if bars overlap or get missed."
                 )
-                short_msg = "Bar: click a bar; Ctrl+click adds seeds to guide edge selection."
+                short_msg = "Bar: click bar; Ctrl+click adds seeds."
             else:  # area
                 msg = (
-                    "Add series (Area): Click inside a filled area to pick its color. "
-                    "The tool reads the outer area boundary (usually the outline) to estimate the value. "
-                    "Set X scale to categorical to auto-detect distinct x-runs; otherwise samples on the X grid. "
-                    "Ctrl+click adds detection seeds (shown as cyan rings) to guide extraction; drag/arrow to adjust seeds."
+                    "Click inside the filled area to choose its color. "
+                    "The tool follows the outer edge to read the values. "
+                    "Ctrl+click adds guide points if the edge is hard to follow."
                 )
-                short_msg = "Area: click inside fill; Ctrl+click adds seeds to guide extractions."
+                short_msg = "Area: click fill; Ctrl+click adds seeds."
         elif mode == "editseries":
             if series_mode == "scatter":
                 msg = (
-                    "Edit series (Scatter): Modifies active series."
-                    "Drag points with mosue or arrow keys to reposition. Right-click away from points inserts a new point (auto-sorted by X). "
-                    "Right-click toggles a point NA/disabled. Ctrl+drag (left or right button) toggles enable/NA for points you sweep over. "
-                    "Edits affect exported CSV values."
+                    "Drag points to fix them. "
+                    "Right-click a point to turn it on/off (NA). "
+                    "Ctrl+drag lets you toggle many points at once. "
+                    "Click a point to make it active, then nudge with arrow keys. Shift+arrow moves faster; Ctrl+arrow cycles the active point."
                 )
-                short_msg = "Edit scatter: drag points; right-click toggles NA; Ctrl+drag sweeps enable/NA."
+                short_msg = "Edit scatter: drag points; right-click toggles NA."
             else:
                 msg = (
-                    "Edit series: Modifies active series. Drag points with mouse or arrow keys to correct values. "
-                    "For line/column/area, dragging is vertical only (X fixed to the sampling grid/category). "
-                    "For bars, dragging adjusts the bar length (X) while category position (Y) stays fixed. "
-                    "Right-click a point toggles NA/disabled. "
-                    "Edits affect exported CSV values."
+                    "Drag points to fix them. "
+                    "Line/column/area move up/down only; bars move left/right only. "
+                    "Right-click a point to turn it on/off (NA). "
+                    "Click a point to make it active, then nudge with arrow keys. Shift+arrow moves faster; Ctrl+arrow cycles the active point."
                 )
-                short_msg = "Edit series: drag points; right-click toggles NA; arrows nudge."
+                short_msg = "Edit: drag points; right-click toggles NA."
         elif mode == "mask":
             msg = (
-                "Mask series: Select a series, then draw a mask to limit extraction. "
-                "Left-drag paints, right-drag erases. Shift+drag draws a rectangle. "
-                "Mouse wheel changes pen size; Shift+wheel toggles circle/square. "
-                f"Use 'Invert' to switch between include/exclude behavior. "
-                f"Pen: {int(self._mask_pen_radius)}px {self._mask_pen_shape}."
+                "Left-drag to include, right-drag to erase. "
+                "Shift-drag draws a rectangle. "
+                "Mouse wheel changes brush size; Shift+wheel changes brush shape."
             )
-            short_msg = "Mask: left-drag paint, right-drag erase, Shift+drag rect, wheel size."
+            short_msg = "Mask: left-drag paint, right-drag erase."
         else:
             # fallback / none
             msg = (
-                "Select a tool mode above. Region controls what pixels are scanned; X/Y ticks control how pixels map to data units."
+                "Select a tool mode above. Data region controls what pixels are scanned; X/Y ticks control how pixels map to data units."
             )
             short_msg = "Select a tool mode above."
 

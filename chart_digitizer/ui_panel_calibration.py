@@ -602,7 +602,7 @@ class Calibrator:
 
 
     def _calibration_key_from_ui(self) -> tuple:
-        roi = self.canvas_actor._roi_px()
+        data_region = self.canvas_actor._data_region_px()
         x_axis_px = self.canvas_actor._x_axis_px()
         y_axis_px = self.canvas_actor._y_axis_px()
         x0_val = (self.var_x0_val.get() or "").strip()
@@ -619,7 +619,7 @@ class Calibrator:
         y_step_unit = (self.var_y_step_unit.get() or "").strip().lower()
         sample_mode = self._sample_label_to_mode(self.var_sample_mode.get())
         return (
-            roi,
+            data_region,
             x_axis_px,
             y_axis_px,
             x0_val,
@@ -641,7 +641,7 @@ class Calibrator:
     def _calibration_key_from_series(self, s: Series) -> tuple:
         cal = s.calibration
         return (
-            cal.roi_px,
+            cal.data_region_px,
             cal.x_axis_px,
             cal.y_axis_px,
             cal.x0_val,
@@ -668,7 +668,7 @@ class Calibrator:
             self._next_calibration_id += 1
             self._calibration_names[key] = name
         (
-            roi,
+            data_region,
             x_axis_px,
             y_axis_px,
             x0_val,
@@ -687,7 +687,7 @@ class Calibrator:
         ) = key
         return CalibrationConfig(
             name=name,
-            roi_px=roi,
+            data_region_px=data_region,
             x_axis_px=x_axis_px,
             y_axis_px=y_axis_px,
             x0_val=x0_val,
@@ -707,7 +707,7 @@ class Calibrator:
 
 
     def _apply_series_calibration_to_ui(self, cal: CalibrationConfig) -> None:
-        self.state.xmin_px, self.state.ymin_px, self.state.xmax_px, self.state.ymax_px = cal.roi_px
+        self.state.xmin_px, self.state.ymin_px, self.state.xmax_px, self.state.ymax_px = cal.data_region_px
         self.state.x0_px, self.state.x1_px = cal.x_axis_px
         self.state.y0_px, self.state.y1_px = cal.y_axis_px
         self.var_x0_val.set(cal.x0_val)
@@ -732,8 +732,8 @@ class Calibrator:
 
     def _pixel_bounds_changes(self, old: CalibrationConfig, new: CalibrationConfig) -> List[str]:
         changes: List[str] = []
-        if old.roi_px != new.roi_px:
-            changes.append("ROI")
+        if old.data_region_px != new.data_region_px:
+            changes.append("Data region")
         if old.x_axis_px != new.x_axis_px:
             changes.append("X axis pixels")
         if old.y_axis_px != new.y_axis_px:
@@ -856,7 +856,7 @@ class Calibrator:
 
 
     def _update_axis_pixels_label(self) -> None:
-        rx0, ry0, rx1, ry1 = self.canvas_actor._roi_px()
+        rx0, ry0, rx1, ry1 = self.canvas_actor._data_region_px()
         x0_px, x1_px = self.canvas_actor._x_axis_px()
         y0_px, y1_px = self.canvas_actor._y_axis_px()
         self.axis_px_values.set(
@@ -879,9 +879,9 @@ class Calibrator:
 
 
     def _build_calibration(self, cal: Optional[CalibrationConfig] = None) -> Calibration:
-        # Use ROI bounds if axis pixels not set
+        # Use data region bounds if axis pixels not set
         if cal is None:
-            x0, y0, x1, y1 = self.canvas_actor._roi_px()
+            x0, y0, x1, y1 = self.canvas_actor._data_region_px()
             x0_px, x1_px = self.canvas_actor._x_axis_px()
             y0_px, y1_px = self.canvas_actor._y_axis_px()
             xs = AxisScale(self.x_scale.get())
@@ -892,7 +892,7 @@ class Calibrator:
             y0v_str = (self.var_y0_val.get() or "").strip()
             y1v_str = (self.var_y1_val.get() or "").strip()
         else:
-            x0, y0, x1, y1 = cal.roi_px
+            x0, y0, x1, y1 = cal.data_region_px
             x0_px, x1_px = cal.x_axis_px
             y0_px, y1_px = cal.y_axis_px
             xs = AxisScale(cal.x_scale)

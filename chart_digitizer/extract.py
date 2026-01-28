@@ -111,7 +111,7 @@ def pick_centered_run_y(
 def expand_full_run_center(mask: np.ndarray, xc: int, y_seed: int) -> int:
     """
     Given a seed y where mask is ON at column xc, expand vertically to the full
-    contiguous ON-run in that column and return its center y (ROI-local).
+    contiguous ON-run in that column and return its center y (data-region local).
     """
     H = mask.shape[0]
     y0 = int(y_seed)
@@ -135,7 +135,7 @@ def expand_full_run_center(mask: np.ndarray, xc: int, y_seed: int) -> int:
 
 def extract_line_series(
     bgr: np.ndarray,
-    roi: Tuple[int,int,int,int],
+    data_region: Tuple[int,int,int,int],
     target_bgr: Tuple[int,int,int],
     tol: int,
     xpx_grid: List[int],
@@ -163,10 +163,10 @@ def extract_line_series(
     require_cv2()
     import cv2
 
-    x0, y0, x1, y1 = roi
-    roi_img = bgr[y0:y1, x0:x1]
+    x0, y0, x1, y1 = data_region
+    data_region_img = bgr[y0:y1, x0:x1]
 
-    mask = color_distance_mask(roi_img, target_bgr, tol).astype(np.uint8) * 255
+    mask = color_distance_mask(data_region_img, target_bgr, tol).astype(np.uint8) * 255
     mask = cv2.morphologyEx(mask, cv2.MORPH_CLOSE, np.ones((3,3), np.uint8), iterations=1)
 
     H, W = mask.shape[:2]
@@ -221,7 +221,7 @@ def extract_line_series(
     def has_multiple_runs(ys: np.ndarray) -> bool:
         return len(_runs_from_ys(ys)) >= 2
 
-    # recent accepted points (ROI-local)
+    # recent accepted points (data-region local)
     recent: List[Tuple[int,int]] = [(cur_x, cur_y)]
     y_by_x: List[Optional[int]] = [None] * W
 
@@ -418,7 +418,7 @@ def extract_line_series(
 
 def extract_scatter_series(
     bgr: np.ndarray,
-    roi: Tuple[int,int,int,int],
+    data_region: Tuple[int,int,int,int],
     target_bgr: Tuple[int,int,int],
     tol: int,
     *,
@@ -434,13 +434,13 @@ def extract_scatter_series(
     use_template_matching: bool = True,
 ) -> List[Tuple[int,int]]:
     """
-    Extract scatter points inside ROI using a color mask, with optional overlap-splitting and
+    Extract scatter points inside the data region using a color mask, with optional overlap-splitting and
     seed-guided shape filtering.
 
     Notes
     - Overlaps: connected components can merge adjacent markers. If split_overlaps=True we use a
       distance-transform watershed to separate blobs into individual markers.
-    - Shapes: if seed_px is provided and falls in ROI, we build a marker template from a local
+    - Shapes: if seed_px is provided and falls in the data region, we build a marker template from a local
       window around the seed and filter candidate components by cv2.matchShapes() similarity.
       This improves robustness against text/line fragments and supports non-filled marker styles
       (e.g., X/O) as long as the marker stroke color is within the mask.
@@ -450,11 +450,11 @@ def extract_scatter_series(
     require_cv2()
     import cv2
 
-    x0, y0, x1, y1 = roi
-    roi_img = bgr[y0:y1, x0:x1]
+    x0, y0, x1, y1 = data_region
+    data_region_img = bgr[y0:y1, x0:x1]
 
     # Base color mask
-    mask = color_distance_mask(roi_img, target_bgr, tol).astype(np.uint8) * 255
+    mask = color_distance_mask(data_region_img, target_bgr, tol).astype(np.uint8) * 255
 
     # No blur/morphology: preserve thin marker strokes.
 
@@ -538,7 +538,7 @@ def extract_scatter_series(
                     markers[unknown > 0] = 0
 
                     # watershed expects 3-channel image
-                    ws_img = roi_img.copy()
+                    ws_img = data_region_img.copy()
                     markers = cv2.watershed(ws_img, markers)
 
                     # markers: -1 boundary, 1 background, 2.. = objects
@@ -646,7 +646,7 @@ def extract_scatter_series(
 
 def extract_scatter_series_fixed_stride(
     bgr: np.ndarray,
-    roi: Tuple[int,int,int,int],
+    data_region: Tuple[int,int,int,int],
     target_bgr: Tuple[int,int,int],
     tol: int,
     *,
@@ -663,7 +663,7 @@ def extract_scatter_series_fixed_stride(
     - mode="fixed_x": grid_px is xpx positions; returns ypx per x (or None).
     - mode="fixed_y": grid_px is ypx positions; returns xpx per y (or None).
     """
-    x0, y0, x1, y1 = roi
+    x0, y0, x1, y1 = data_region
     if band_px is None:
         if len(grid_px) >= 2:
             diffs = [abs(int(grid_px[i + 1]) - int(grid_px[i])) for i in range(len(grid_px) - 1)]
@@ -676,9 +676,9 @@ def extract_scatter_series_fixed_stride(
     require_cv2()
     import cv2
 
-    x0, y0, x1, y1 = roi
-    roi_img = bgr[y0:y1, x0:x1]
-    mask = color_distance_mask(roi_img, target_bgr, tol).astype(np.uint8) * 255
+    x0, y0, x1, y1 = data_region
+    data_region_img = bgr[y0:y1, x0:x1]
+    mask = color_distance_mask(data_region_img, target_bgr, tol).astype(np.uint8) * 255
 
     tmpl_list: List[np.ndarray] = []
     bboxes: List[Tuple[int, int, int, int]] = []
@@ -713,7 +713,7 @@ def extract_scatter_series_fixed_stride(
     if not tmpl_list:
         pts = extract_scatter_series(
             bgr,
-            roi,
+            data_region,
             target_bgr,
             tol,
             seed_px=seed_px,
@@ -917,7 +917,7 @@ def _scan_column_for_edge(
 
     This is robust to combo charts where other series (lines) overwrite a few pixels inside the bar.
     """
-    # Column slice in ROI-local coordinates
+    # Column slice in data-region local coordinates
     col = (mask[y0:y1, x_local] > 0)
     H = int(col.shape[0])
     if H <= 0 or (not np.any(col)):
@@ -957,7 +957,7 @@ def _scan_column_for_edge(
     if best is None:
         return None
 
-    # Convert back to ROI-local mask coordinates (not absolute image coords)
+    # Convert back to data-region local mask coordinates (not absolute image coords)
     return int(y0 + best)
 
 

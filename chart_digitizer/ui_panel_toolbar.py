@@ -20,7 +20,7 @@ class ToolbarPanel:
 
         ttk.Label(self.frame, text="Tool:").pack(side="left")
         for lbl, val in [
-            ("Set Region", "roi"),
+            ("Set Data Region", "data_region"),
             ("Set X ticks", "xaxis"),
             ("Set Y ticks", "yaxis"),
             ("Add series", "addseries"),

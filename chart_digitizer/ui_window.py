@@ -42,7 +42,7 @@ class ChartDigitizerWindow(tk.Toplevel):
         self._next_calibration_id = 1
 
         # Tool mode
-        self.tool_mode = tk.StringVar(value="roi")  # edit|roi|xaxis|yaxis|addseries
+        self.tool_mode = tk.StringVar(value="data_region")  # edit|data_region|xaxis|yaxis|addseries
         self.series_mode = tk.StringVar(value="line")  # line|scatter|column|bar|area
         self.var_stacked = tk.BooleanVar(value=False)
         self.var_prefer_outline = tk.BooleanVar(value=True)
@@ -110,15 +110,15 @@ class ChartDigitizerWindow(tk.Toplevel):
         self._axis_drag_axis: Optional[str] = None  # "x" or "y"
         self._axis_drag_active: bool = False
         self._axis_drag_threshold = 3
-        self._nudge_target: Optional[str] = None  # roi_tl|roi_tr|roi_bl|roi_br|x0|x1|y0|y1
+        self._nudge_target: Optional[str] = None  # data_region_tl|data_region_tr|data_region_bl|data_region_br|x0|x1|y0|y1
         self._axis_label_pos: dict[str, Tuple[int, int]] = {}
         self._axis_label_bboxes: dict[str, Tuple[int, int, int, int]] = {}
         self._axis_label_drag: Optional[str] = None
         self._seed_drag: Optional[Tuple[int, str, int]] = None  # (series_id, kind, index)
         self._seed_drag_start: Optional[Tuple[int, int]] = None
         self._last_mouse_canvas: Optional[Tuple[int, int]] = None
-        self._roi_resize_corner: Optional[str] = None
-        self._roi_resize_anchor: Optional[Tuple[int, int]] = None
+        self._data_region_resize_corner: Optional[str] = None
+        self._data_region_resize_anchor: Optional[Tuple[int, int]] = None
 
         self._build_ui()
         self._on_series_mode_change()
@@ -135,6 +135,7 @@ class ChartDigitizerWindow(tk.Toplevel):
 
         left = ttk.Frame(self._panes)
         right = ttk.Frame(self._panes, width=340)
+        self._left_panel = left
         self._right_panel = right
         self._panes.add(left, weight=2)
         self._panes.add(right, weight=1)
@@ -149,6 +150,7 @@ class ChartDigitizerWindow(tk.Toplevel):
 
         # Canvas panel
         self.canvas_panel = CanvasPanel(self, left, actor=self.canvas_actor)
+        self._left_panel.bind("<Configure>", self.canvas_actor._on_left_panel_configure)
 
         # Right panel: calibration / extraction / series / export
         self.calibration_panel = CalibrationPanel(

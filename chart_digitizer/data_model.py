@@ -14,7 +14,7 @@ StrideMode = Literal["continuous", "categorical"]
 @dataclass(frozen=True)
 class CalibrationConfig:
     name: str
-    roi_px: Tuple[int, int, int, int]
+    data_region_px: Tuple[int, int, int, int]
     x_axis_px: Tuple[int, int]
     y_axis_px: Tuple[int, int]
     x0_val: str

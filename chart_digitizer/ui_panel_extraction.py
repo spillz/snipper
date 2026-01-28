@@ -235,7 +235,7 @@ class Extractor:
         - column/area: boundary read (top/bottom vs baseline) sampled by stride mode
         - bar: boundary read (left/right vs baseline) along categorical Y centers
         """
-        roi = s.calibration.roi_px
+        data_region = s.calibration.data_region_px
         tol = int(getattr(s, "color_tol", self.var_tol.get()))
         cal = self.owner.calibrator._build_calibration(s.calibration)
 
@@ -252,7 +252,7 @@ class Extractor:
             if sample_mode == "free":
                 pts_px = extract_scatter_series(
                     self._bgr,
-                    roi,
+                    data_region,
                     s.color_bgr,
                     tol,
                     seed_px=s.seed_px,
@@ -270,9 +270,9 @@ class Extractor:
 
             if sample_mode == "fixed_x":
                 x0_val = self.owner.calibrator._require_value(s.calibration.x0_val, "x0", cal=s.calibration)
-                roi_xmin_px, _, roi_xmax_px, _ = roi
-                xmin = float(cal.x_px_to_data(roi_xmin_px))
-                xmax = float(cal.x_px_to_data(roi_xmax_px))
+                data_region_xmin_px, _, data_region_xmax_px, _ = data_region
+                xmin = float(cal.x_px_to_data(data_region_xmin_px))
+                xmax = float(cal.x_px_to_data(data_region_xmax_px))
                 if xmin > xmax:
                     xmin, xmax = xmax, xmin
 
@@ -296,7 +296,7 @@ class Extractor:
 
                 ypx_raw = extract_scatter_series_fixed_stride(
                     self._bgr,
-                    roi,
+                    data_region,
                     s.color_bgr,
                     tol,
                     mode="fixed_x",
@@ -340,9 +340,9 @@ class Extractor:
 
             if sample_mode == "fixed_y":
                 y0_val = self.owner.calibrator._require_value(s.calibration.y0_val, "y0", cal=s.calibration)
-                roi_ymin_px, roi_ymax_px = roi[1], roi[3]
-                ymin = float(cal.y_px_to_data(roi_ymin_px))
-                ymax = float(cal.y_px_to_data(roi_ymax_px))
+                data_region_ymin_px, data_region_ymax_px = data_region[1], data_region[3]
+                ymin = float(cal.y_px_to_data(data_region_ymin_px))
+                ymax = float(cal.y_px_to_data(data_region_ymax_px))
                 if ymin > ymax:
                     ymin, ymax = ymax, ymin
 
@@ -366,7 +366,7 @@ class Extractor:
 
                 xpx_raw = extract_scatter_series_fixed_stride(
                     self._bgr,
-                    roi,
+                    data_region,
                     s.color_bgr,
                     tol,
                     mode="fixed_y",
@@ -410,13 +410,13 @@ class Extractor:
 
             raise ValueError(f"Unsupported scatter sample mode: {sample_mode}")
 
-        # Helper: build a uint8 mask for this series inside ROI
+        # Helper: build a uint8 mask for this series inside the data region
         require_cv2()
         import cv2
 
-        x0, y0, x1, y1 = roi
-        roi_img = self._bgr[y0:y1, x0:x1]
-        m = color_distance_mask(roi_img, s.color_bgr, tol)
+        x0, y0, x1, y1 = data_region
+        data_region_img = self._bgr[y0:y1, x0:x1]
+        m = color_distance_mask(data_region_img, s.color_bgr, tol)
         mask = (m.astype(np.uint8) * 255) if (m.dtype != np.uint8 or m.max() <= 1) else m.copy()
 
         # Optional: prefer outline/edge pixels (useful for stroked bars/areas)
@@ -427,7 +427,7 @@ class Extractor:
             if int(edge.sum()) > 0:
                 mask = edge
 
-        mask = self.owner.canvas_actor._apply_series_mask_to_roi(s, roi, mask)
+        mask = self.owner.canvas_actor._apply_series_mask_to_data_region(s, data_region, mask)
 
         def _scan_col_edge(x_local: int, *, prefer_top: bool, y_hint_local: int | None, band: int = 10) -> int | None:
             col = (mask[:, x_local] > 0)
@@ -460,9 +460,9 @@ class Extractor:
         # ---------------- Line ----------------
         if kind == "line":
             x0_val = self.owner.calibrator._require_value(s.calibration.x0_val, "x0", cal=s.calibration)
-            roi_xmin_px, _, roi_xmax_px, _ = roi
-            xmin = float(cal.x_px_to_data(roi_xmin_px))
-            xmax = float(cal.x_px_to_data(roi_xmax_px))
+            data_region_xmin_px, _, data_region_xmax_px, _ = data_region
+            xmin = float(cal.x_px_to_data(data_region_xmin_px))
+            xmax = float(cal.x_px_to_data(data_region_xmax_px))
             if xmin > xmax:
                 xmin, xmax = xmax, xmin
 
@@ -484,12 +484,12 @@ class Extractor:
                     x_grid = build_x_grid_aligned(xmin, xmax, step, anchor=x0_val)
                 xpx_grid = [int(round(cal.x_data_to_px(x))) for x in x_grid]
 
-            roi_h = max(1, y1 - y0)
-            band_reacq_px = max(40, int(0.25 * roi_h))
-            max_jump_px = max(30, int(0.20 * roi_h))
+            data_region_h = max(1, y1 - y0)
+            band_reacq_px = max(40, int(0.25 * data_region_h))
+            max_jump_px = max(30, int(0.20 * data_region_h))
 
             px_pts, ypx_raw = extract_line_series(
-                self._bgr, roi, s.color_bgr, tol, xpx_grid,
+                self._bgr, data_region, s.color_bgr, tol, xpx_grid,
                 seed_px=s.seed_px,
                 extra_seeds_px=(s.extra_seeds_px or None),
                 band_reacq_px=band_reacq_px,
@@ -548,9 +548,9 @@ class Extractor:
                     x_grid = [float(cal.x_px_to_data(xpx)) for xpx in xpx_grid]
             else:
                 x0_val = self.owner.calibrator._require_value(s.calibration.x0_val, "x0", cal=s.calibration)
-                roi_xmin_px, _, roi_xmax_px, _ = roi
-                xmin = float(cal.x_px_to_data(roi_xmin_px))
-                xmax = float(cal.x_px_to_data(roi_xmax_px))
+                data_region_xmin_px, _, data_region_xmax_px, _ = data_region
+                xmin = float(cal.x_px_to_data(data_region_xmin_px))
+                xmax = float(cal.x_px_to_data(data_region_xmax_px))
                 if xmin > xmax:
                     xmin, xmax = xmax, xmin
                 step = float(s.calibration.x_step)
@@ -571,7 +571,7 @@ class Extractor:
             except Exception:
                 baseline_y_px = None
             if baseline_y_px is None:
-                baseline_y_px = s.calibration.y_axis_px[0]  # y0 tick (defaults to bottom ROI)
+                baseline_y_px = s.calibration.y_axis_px[0]  # y0 tick (defaults to bottom data region)
 
             sx, sy = s.seed_px
             prefer_top = (sy < int(baseline_y_px))
@@ -674,9 +674,9 @@ class Extractor:
             # For bars, allow fixed-Y sampling when stride is continuous.
             if stride == "continuous":
                 y0_val = self.owner.calibrator._require_value(s.calibration.y0_val, "y0", cal=s.calibration)
-                roi_ymin_px, roi_ymax_px = roi[1], roi[3]
-                ymin = float(cal.y_px_to_data(roi_ymin_px))
-                ymax = float(cal.y_px_to_data(roi_ymax_px))
+                data_region_ymin_px, data_region_ymax_px = data_region[1], data_region[3]
+                ymin = float(cal.y_px_to_data(data_region_ymin_px))
+                ymax = float(cal.y_px_to_data(data_region_ymax_px))
                 if ymin > ymax:
                     ymin, ymax = ymax, ymin
 
@@ -721,7 +721,7 @@ class Extractor:
             except Exception:
                 baseline_x_px = None
             if baseline_x_px is None:
-                baseline_x_px = s.calibration.x_axis_px[0]  # x0 tick (defaults to left ROI)
+                baseline_x_px = s.calibration.x_axis_px[0]  # x0 tick (defaults to left data region)
 
             sx, sy = s.seed_px
             prefer_right = (sx > int(baseline_x_px))
