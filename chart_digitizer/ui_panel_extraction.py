@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 from datetime import datetime, timezone
+import math
 import tkinter as tk
 from tkinter import ttk
 from typing import Callable, List, Optional, Tuple
@@ -579,12 +580,47 @@ class Extractor:
             px_points: List[Tuple[int, int]] = []
             y_hint_local: Optional[int] = int(sy - y0) if (y0 <= sy < y1) else None
 
+            # Optional seed-guided edge selection: use extra seeds to estimate expected y(x).
+            seed_pts: List[Tuple[int, int]] = []
+            if s.extra_seeds_px:
+                for px, py in [s.seed_px] + list(s.extra_seeds_px):
+                    if x0 <= px < x1 and y0 <= py < y1:
+                        seed_pts.append((int(px - x0), int(py - y0)))
+            seed_pts = sorted(seed_pts, key=lambda p: p[0])
+            use_seed_guidance = len(seed_pts) >= 2
+
+            def _interp_expected_y(x_local: int) -> Optional[int]:
+                if not use_seed_guidance:
+                    return None
+                if x_local <= seed_pts[0][0]:
+                    return int(seed_pts[0][1])
+                if x_local >= seed_pts[-1][0]:
+                    return int(seed_pts[-1][1])
+                for i in range(1, len(seed_pts)):
+                    x1l, y1l = seed_pts[i]
+                    x0l, y0l = seed_pts[i - 1]
+                    if x0l <= x_local <= x1l:
+                        dx = max(1, x1l - x0l)
+                        t = (x_local - x0l) / dx
+                        return int(round(y0l + t * (y1l - y0l)))
+                return None
+
             for xpx in xpx_grid:
                 if xpx < x0 or xpx >= x1:
                     ypx_raw.append(None)
                     continue
                 xc = int(xpx - x0)
-                y_local = _scan_col_edge(xc, prefer_top=prefer_top, y_hint_local=y_hint_local, band=12)
+                expected_y = _interp_expected_y(xc)
+                if expected_y is not None:
+                    y_top = _scan_col_edge(xc, prefer_top=True, y_hint_local=expected_y, band=12)
+                    y_bot = _scan_col_edge(xc, prefer_top=False, y_hint_local=expected_y, band=12)
+                    candidates = [y for y in (y_top, y_bot) if y is not None]
+                    if candidates:
+                        y_local = min(candidates, key=lambda y: abs(int(y) - int(expected_y)))
+                    else:
+                        y_local = None
+                else:
+                    y_local = _scan_col_edge(xc, prefer_top=prefer_top, y_hint_local=y_hint_local, band=12)
                 if y_local is None:
                     ypx_raw.append(None)
                     continue
@@ -635,24 +671,43 @@ class Extractor:
 
         # ---------------- Bar (horizontal) ----------------
         if kind == "bar":
-            # For bars, categorical is the dominant case (categories along Y).
-            labels = self.owner.calibrator._parse_categories(s.calibration.categories)
-            if labels:
-                centers = self.owner.calibrator._category_centers_px(len(labels), axis="y", axis_px=s.calibration.y_axis_px)
-                offset = 0.0
-                if s.seed_px is not None:
-                    offset = self.owner.calibrator._category_offset_px(
-                        len(labels),
-                        axis="y",
-                        seed_px=s.seed_px,
-                        axis_px=s.calibration.y_axis_px,
+            # For bars, allow fixed-Y sampling when stride is continuous.
+            if stride == "continuous":
+                y0_val = self.owner.calibrator._require_value(s.calibration.y0_val, "y0", cal=s.calibration)
+                roi_ymin_px, roi_ymax_px = roi[1], roi[3]
+                ymin = float(cal.y_px_to_data(roi_ymin_px))
+                ymax = float(cal.y_px_to_data(roi_ymax_px))
+                if ymin > ymax:
+                    ymin, ymax = ymax, ymin
+
+                step = float(s.calibration.y_step)
+                if cal.y.scale == AxisScale.DATE:
+                    y_grid = self._build_date_grid_aligned(
+                        ymin, ymax, step, s.calibration.y_step_unit, anchor=y0_val
                     )
-                ypx_grid = [int(round(p + offset)) for p in centers]
-                cat_grid = [float(i + 1) for i in range(len(labels))]
+                else:
+                    y_grid = build_x_grid_aligned(ymin, ymax, step, anchor=y0_val)
+                ypx_grid = [int(round(cal.y_data_to_px(y))) for y in y_grid]
+                cat_grid = [float(y) for y in y_grid]
             else:
-                centers = detect_runs_centers_along_y(mask, min_run_px=2)
-                # Sort centers in display order (top->bottom). Categories typically go from top to bottom.
-                centers = sorted(centers)
+                # For bars, categorical is the dominant case (categories along Y).
+                labels = self.owner.calibrator._parse_categories(s.calibration.categories)
+                if labels:
+                    centers = self.owner.calibrator._category_centers_px(len(labels), axis="y", axis_px=s.calibration.y_axis_px)
+                    offset = 0.0
+                    if s.seed_px is not None:
+                        offset = self.owner.calibrator._category_offset_px(
+                            len(labels),
+                            axis="y",
+                            seed_px=s.seed_px,
+                            axis_px=s.calibration.y_axis_px,
+                        )
+                    ypx_grid = [int(round(p + offset)) for p in centers]
+                    cat_grid = [float(i + 1) for i in range(len(labels))]
+                else:
+                    centers = detect_runs_centers_along_y(mask, min_run_px=2)
+                    # Sort centers in display order (top->bottom). Categories typically go from top to bottom.
+                    centers = sorted(centers)
 
                 ypx_grid = [int(y0 + c) for c in centers]
                 # category coordinate (x axis in exported table): use y-axis data coordinate of the category center
@@ -675,18 +730,79 @@ class Extractor:
             px_points: List[Tuple[int, int]] = []
             x_hint_local: Optional[int] = int(sx - x0) if (x0 <= sx < x1) else None
 
+            # Optional seed-guided edge selection: use extra seeds to estimate expected x(y).
+            seed_pts: List[Tuple[int, int]] = []
+            if s.extra_seeds_px:
+                for px, py in [s.seed_px] + list(s.extra_seeds_px):
+                    if x0 <= px < x1 and y0 <= py < y1:
+                        seed_pts.append((int(py - y0), int(px - x0)))
+            seed_pts = sorted(seed_pts, key=lambda p: p[0])
+            use_seed_guidance = len(seed_pts) >= 2
+
+            def _interp_expected_x(y_local: int) -> Optional[int]:
+                if not use_seed_guidance:
+                    return None
+                if y_local <= seed_pts[0][0]:
+                    return int(seed_pts[0][1])
+                if y_local >= seed_pts[-1][0]:
+                    return int(seed_pts[-1][1])
+                for i in range(1, len(seed_pts)):
+                    y1l, x1l = seed_pts[i]
+                    y0l, x0l = seed_pts[i - 1]
+                    if y0l <= y_local <= y1l:
+                        dy = max(1, y1l - y0l)
+                        t = (y_local - y0l) / dy
+                        return int(round(x0l + t * (x1l - x0l)))
+                return None
+
+            # Vertical tolerance for fixed-y sampling: +/- 10-20% of expected spacing.
+            y_search_band = 0
+            if stride == "continuous" and len(ypx_grid) > 1:
+                diffs = [abs(ypx_grid[i + 1] - ypx_grid[i]) for i in range(len(ypx_grid) - 1)]
+                diffs = [d for d in diffs if d > 0]
+                if diffs:
+                    med = float(np.median(diffs))
+                    y_search_band = int(math.ceil(0.2 * med))
+
             for ypx in ypx_grid:
                 if ypx < y0 or ypx >= y1:
                     xpx_raw.append(None)
                     continue
                 yc = int(ypx - y0)
-                x_local = _scan_row_edge(yc, prefer_left=(not prefer_right), x_hint_local=x_hint_local, band=12)
+                y_local = yc
+                if y_search_band > 0:
+                    best = None  # (neg_count, dist, y_local)
+                    y_lo = max(0, yc - y_search_band)
+                    y_hi = min(mask.shape[0] - 1, yc + y_search_band)
+                    for y_try in range(y_lo, y_hi + 1):
+                        row = (mask[y_try, :] > 0)
+                        if not np.any(row):
+                            continue
+                        cnt = int(np.count_nonzero(row))
+                        dist = abs(y_try - yc)
+                        score = (-cnt, dist, y_try)
+                        if best is None or score < best:
+                            best = score
+                    if best is not None:
+                        y_local = int(best[2])
+
+                expected_x = _interp_expected_x(y_local)
+                if expected_x is not None:
+                    x_left = _scan_row_edge(y_local, prefer_left=True, x_hint_local=expected_x, band=12)
+                    x_right = _scan_row_edge(y_local, prefer_left=False, x_hint_local=expected_x, band=12)
+                    candidates = [x for x in (x_left, x_right) if x is not None]
+                    if candidates:
+                        x_local = min(candidates, key=lambda x: abs(int(x) - int(expected_x)))
+                    else:
+                        x_local = None
+                else:
+                    x_local = _scan_row_edge(y_local, prefer_left=(not prefer_right), x_hint_local=x_hint_local, band=12)
                 if x_local is None:
                     xpx_raw.append(None)
                     continue
                 xpx = int(x0 + x_local)
                 xpx_raw.append(xpx)
-                px_points.append((int(xpx), int(ypx)))
+                px_points.append((int(xpx), int(y0 + y_local)))
                 x_hint_local = int(x_local)
 
             # Convert to values: x is bar value, category is cat_grid
@@ -694,13 +810,26 @@ class Extractor:
             en: List[bool] = []
             pxs: List[Tuple[int, int]] = []
 
-            for i, cat in enumerate(cat_grid):
-                if xpx_raw[i] is None:
-                    continue
-                val = float(cal.x_px_to_data(int(xpx_raw[i])))
-                pts.append((float(cat), float(val)))
-                en.append(True)
-                pxs.append((int(xpx_raw[i]), int(ypx_grid[i])))
+            if stride == "continuous":
+                baseline_val = float(cal.x_px_to_data(int(baseline_x_px)))
+                for i, cat in enumerate(cat_grid):
+                    if xpx_raw[i] is None:
+                        pts.append((float(cat), float(baseline_val)))
+                        en.append(False)
+                        pxs.append((int(baseline_x_px), int(ypx_grid[i])))
+                        continue
+                    val = float(cal.x_px_to_data(int(xpx_raw[i])))
+                    pts.append((float(cat), float(val)))
+                    en.append(True)
+                    pxs.append((int(xpx_raw[i]), int(ypx_grid[i])))
+            else:
+                for i, cat in enumerate(cat_grid):
+                    if xpx_raw[i] is None:
+                        continue
+                    val = float(cal.x_px_to_data(int(xpx_raw[i])))
+                    pts.append((float(cat), float(val)))
+                    en.append(True)
+                    pxs.append((int(xpx_raw[i]), int(ypx_grid[i])))
 
             s.points = pts
             s.point_enabled = en

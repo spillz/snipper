@@ -43,12 +43,6 @@ class CanvasPanel:
         owner.canvas.bind("<Button-1>", actor._on_click)
         owner.canvas.bind("<B1-Motion>", actor._on_drag)
         owner.canvas.bind("<ButtonRelease-1>", actor._on_release)
-        owner.canvas.bind("<Shift-ButtonPress-1>", actor._on_scatter_rubberband_press)
-        owner.canvas.bind("<Shift-B1-Motion>", actor._on_scatter_rubberband_motion)
-        owner.canvas.bind("<Shift-ButtonRelease-1>", actor._on_scatter_rubberband_release)
-        owner.canvas.bind("<Control-Shift-ButtonPress-1>", actor._on_scatter_rubberband_press)
-        owner.canvas.bind("<Control-Shift-B1-Motion>", actor._on_scatter_rubberband_motion)
-        owner.canvas.bind("<Control-Shift-ButtonRelease-1>", actor._on_scatter_rubberband_release)
         owner.canvas.bind("<Motion>", actor._on_motion)
         owner.canvas.bind("<Button-3>", actor._on_right_click)
         owner.canvas.bind("<B3-Motion>", actor._on_right_drag)
@@ -89,6 +83,21 @@ class CanvasActor:
             except Exception:
                 pass
         self._render_after_id = self.after(30, self._render_image)
+
+    def _set_tip_text(self, text: str, short_text: Optional[str] = None) -> None:
+        if not getattr(self, "tip_label", None):
+            self.tip_var.set(text)
+            return
+        self.tip_label.update_idletasks()
+        wrap_px = int(max(120, self.tip_label.winfo_width()))
+        self.tip_label.configure(wraplength=wrap_px)
+        self.tip_var.set(text)
+        self.tip_label.update_idletasks()
+        if short_text:
+            max_h = int(self.loupe.winfo_height()) if getattr(self, "loupe", None) else 0
+            if max_h > 0 and self.tip_label.winfo_reqheight() > max_h:
+                self.tip_var.set(short_text)
+
 
 
     def _render_image(self):
@@ -793,11 +802,10 @@ class CanvasActor:
     def _on_click(self, event):
         self.canvas.focus_set()
         self._last_mouse_canvas = (event.x, event.y)
-        if event.state & 0x0004:  # Control held: handled by ctrl bindings
-            return
-        if event.state & 0x0001:  # Shift held: handled by shift bindings
-            if self.tool_mode.get() == "addseries" and self.series_mode.get() == "scatter":
+        if event.state & 0x0004:  # Control held: usually handled by ctrl bindings
+            if not (self.tool_mode.get() == "addseries" and self.series_mode.get() == "scatter"):
                 return
+        if event.state & 0x0001:  # Shift held: handled by shift bindings
             if self.tool_mode.get() == "mask":
                 return
         xpx, ypx = self._to_image_px(event.x, event.y)
@@ -866,6 +874,9 @@ class CanvasActor:
             return
 
         if mode == "addseries":
+            if self.series_mode.get() == "scatter":
+                self._on_scatter_rubberband_press(event)
+                return
             self._add_series_from_click(xpx, ypx)
             return
 
@@ -901,6 +912,7 @@ class CanvasActor:
 
     def _on_drag(self, event):
         if self._scatter_rb_active:
+            self._on_scatter_rubberband_motion(event)
             return
         xpx, ypx = self._to_image_px(event.x, event.y)
         mode = self.tool_mode.get()
@@ -1040,6 +1052,7 @@ class CanvasActor:
 
     def _on_release(self, event):
         if self._scatter_rb_active:
+            self._on_scatter_rubberband_release(event)
             return
         if self.tool_mode.get() == "mask":
             if self._mask_drawing:
@@ -1196,7 +1209,10 @@ class CanvasActor:
             self._scatter_rb_id = None
 
         if (x1 - x0) < 3 or (y1 - y0) < 3:
-            self._add_series_from_click(xpx, ypx)
+            if additive:
+                self._add_extra_seed_at(xpx, ypx)
+            else:
+                self._add_series_from_click(xpx, ypx)
             return
 
         if additive:
@@ -1519,7 +1535,7 @@ class CanvasActor:
 
     def _on_ctrl_toggle_press(self, event):
         if self.tool_mode.get() == "addseries":
-            if (event.state & 0x0001) and self.series_mode.get() == "scatter":
+            if self.series_mode.get() == "scatter":
                 return
             if self._add_extra_seed_from_click(event):
                 return
@@ -1572,7 +1588,7 @@ class CanvasActor:
         return best
 
 
-    def _add_extra_seed_from_click(self, event) -> bool:
+    def _add_extra_seed_at(self, xpx: int, ypx: int) -> bool:
         s = None
         if self._active_series_id is not None:
             s = self.owner.series_actor._get_series(self._active_series_id)
@@ -1580,8 +1596,6 @@ class CanvasActor:
             s = self.series[-1]
         if not s or getattr(s, "chart_kind", s.mode) not in ("line", "scatter"):
             return False
-
-        xpx, ypx = self._to_image_px(event.x, event.y)
         if s.extra_seeds_px is None:
             s.extra_seeds_px = []
         s.extra_seeds_px.append((xpx, ypx))
@@ -1613,6 +1627,10 @@ class CanvasActor:
         self.owner.series_actor._update_tree_row(s)
         self._redraw_overlay()
         return True
+
+    def _add_extra_seed_from_click(self, event) -> bool:
+        xpx, ypx = self._to_image_px(event.x, event.y)
+        return self._add_extra_seed_at(xpx, ypx)
 
     # ---------- Loupe ----------
 
@@ -2000,12 +2018,13 @@ class CanvasActor:
 
         if mode == "roi":
             msg = (
-                "Set Region: Click and drag to define the rectangular region of interest (ROI). "
+                "Set data region: Click and drag to define the rectangular region of interest (ROI). "
                 "Only pixels inside this region are scanned for the series by their color. "
                 "If you do not set tick pixels, tick positions default to the region edges. "
                 "Click a corner handle to select it, then use arrow keys to nudge (Shift+arrow = 10px). "
                 "Ctrl+arrow cycles between handles."
             )
+            short_msg = "Set date region: drag a rectangle with mouse. Nudge corners with mouse or arrows (Shift+arrow=10px)."
         elif mode == "xaxis":
             msg = (
                 "Set X ticks: Click any two tick positions on the vertical axis. "
@@ -2014,6 +2033,7 @@ class CanvasActor:
                 "Drag to set x0 then x1, or drag the label boxes to move a tick. "
                 "Use arrow keys to nudge the active tick (Shift+arrow = 10px, Ctrl+arrow cycles)."
             )
+            short_msg = "Set X ticks: click two x-axis tick positions, then enter x0/x1."
         elif mode == "yaxis":
             msg = (
                 "Set Y ticks: Click any two tick positions on the vertical axis. "
@@ -2022,63 +2042,68 @@ class CanvasActor:
                 "Drag to set y0 then y1, or drag the label boxes to move a tick. "
                 "Use arrow keys to nudge the active tick (Shift+arrow = 10px, Ctrl+arrow cycles)."
             )
+            short_msg = "Set Y ticks: click two y-axis tick positions, then enter y0/y1."
         elif mode == "addseries":
             if series_mode == "scatter":
                 msg = (
-                    "Add series (Scatter): Click a marker color to extract all points of that color. "
-                    "Shift+drag draws a rectangular selection around a marker to match on shape. "
-                    "Ctrl+click adds a seed to the active/last series; Ctrl+Shift+drag adds a template to it. "
+                    "Add series (Scatter): Click a colored scatter point to extract all matching solid, single-color markers. "
+                    "Drag a rectangle around a scatter point to use shape-based template matching for tougher cases. "
+                    "Ctrl+click adds a seed; Ctrl+drag adds more shape templates. "
                     "Drag seed markers to reposition and re-extract. Ctrl+arrow cycles active seeds."
                 )
+                short_msg = "Scatter: click color; drag for template; Ctrl+click adds seeds; Ctrl+drag adds template."
             elif series_mode == "line":
                 msg = (
                     "Add series (Line): Click directly on a line in the chart to generate the series data. "
-                    "The tool tracks the line from the clicked point across the region and samples it onto the X grid. "
-                    "X step controls the output sampling grid; missing samples are interpolated/flatlined. "
-                    "Color tol controls how closely pixels must match the clicked color. "
-                    "Ctrl+click adds detection seeds (shown as cyan rings) and rebuilds the line trace. "
+                    "Calibration and extraction parameters affect extraction results."
+                    "Ctrl+click adds detection seeds (shown as cyan rings) to improve extractions. "
                     "Drag seed markers to reposition and re-extract. Ctrl+arrow cycles active seeds."
                 )
+                short_msg = "Line: click the line; Ctrl+click adds seeds; drag seeds to re-extract."
             elif series_mode == "column":
                 msg = (
-                    "Add series (Column): Click inside a bar segment to pick its color. "
+                    "Add series (Column): Click inside a bar segment to match columns of similar color. "
                     "The tool reads the bar boundary (usually the outline) to estimate the value. "
                     "Set X scale to categorical to auto-detect bar centers; otherwise samples on the X grid. "
+                    "Ctrl+click adds detection seeds (shown as cyan rings) to guide edge selection; drag seeds to adjust. "
                     "Stacked indicates the series is a cumulative boundary; export can emit deltas between boundaries."
                 )
+                short_msg = "Column: click a bar; Ctrl+click adds seeds to guide edge selection."
             elif series_mode == "bar":
                 msg = (
                     "Add series (Bar): Click inside a horizontal bar segment to pick its color. "
                     "The tool reads the bar boundary (usually the outline) to estimate the value. "
                     "Set Y scale to categorical to auto-detect bar centers along Y. "
+                    "Ctrl+click adds detection seeds (shown as cyan rings) to guide extraction; drag/arrow to adjust seeds. "
                     "Stacked indicates the series is a cumulative boundary; export can emit deltas between boundaries."
                 )
+                short_msg = "Bar: click a bar; Ctrl+click adds seeds to guide edge selection."
             else:  # area
                 msg = (
                     "Add series (Area): Click inside a filled area to pick its color. "
                     "The tool reads the outer area boundary (usually the outline) to estimate the value. "
-                    "Set X scale to categorical to auto-detect distinct x-runs; otherwise samples on the X grid."
+                    "Set X scale to categorical to auto-detect distinct x-runs; otherwise samples on the X grid. "
+                    "Ctrl+click adds detection seeds (shown as cyan rings) to guide extraction; drag/arrow to adjust seeds."
                 )
+                short_msg = "Area: click inside fill; Ctrl+click adds seeds to guide extractions."
         elif mode == "editseries":
             if series_mode == "scatter":
                 msg = (
-                    "Edit series (Scatter): Select a series in the table. Right-click toggles a point NA/disabled. "
-                    "Drag points to reposition. Right-click away from points inserts a new point (auto-sorted by X). "
-                    "Ctrl+drag (left or right button) toggles enable/NA for points you sweep over. "
-                    "Click a point to make it active, then use arrow keys to nudge (Shift+arrow = 10px, Ctrl+arrow cycles). "
-                    "Drag seed markers to reposition and re-extract. "
+                    "Edit series (Scatter): Modifies active series."
+                    "Drag points with mosue or arrow keys to reposition. Right-click away from points inserts a new point (auto-sorted by X). "
+                    "Right-click toggles a point NA/disabled. Ctrl+drag (left or right button) toggles enable/NA for points you sweep over. "
                     "Edits affect exported CSV values."
                 )
+                short_msg = "Edit scatter: drag points; right-click toggles NA; Ctrl+drag sweeps enable/NA."
             else:
                 msg = (
-                    "Edit series: Select a series in the table, then drag points to correct values. "
+                    "Edit series: Modifies active series. Drag points with mouse or arrow keys to correct values. "
                     "For line/column/area, dragging is vertical only (X fixed to the sampling grid/category). "
                     "For bars, dragging adjusts the bar length (X) while category position (Y) stays fixed. "
                     "Right-click a point toggles NA/disabled. "
-                    "Click a point to make it active, then use arrow keys to nudge (Shift+arrow = 10px, Ctrl+arrow cycles). "
-                    "Drag seed markers to reposition and re-extract. "
                     "Edits affect exported CSV values."
                 )
+                short_msg = "Edit series: drag points; right-click toggles NA; arrows nudge."
         elif mode == "mask":
             msg = (
                 "Mask series: Select a series, then draw a mask to limit extraction. "
@@ -2087,11 +2112,12 @@ class CanvasActor:
                 f"Use 'Invert' to switch between include/exclude behavior. "
                 f"Pen: {int(self._mask_pen_radius)}px {self._mask_pen_shape}."
             )
+            short_msg = "Mask: left-drag paint, right-drag erase, Shift+drag rect, wheel size."
         else:
             # fallback / none
             msg = (
                 "Select a tool mode above. Region controls what pixels are scanned; X/Y ticks control how pixels map to data units."
             )
+            short_msg = "Select a tool mode above."
 
-        self.tip_var.set(msg)
-
+        self._set_tip_text(msg, short_msg)
