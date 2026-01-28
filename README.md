@@ -55,7 +55,7 @@ See additional notes for running in UV and compiling your own binaries below.
 
 1. Open a chart image in your viewer of choice, then in snipper, click **Chart snip** and drag-select the chart region in your viewer.
 2. Setup the chart for data point detection:
-   - Toolbar: **Set region**: The part of the chart that contains series data. Defaults to the full image snip.
+   - Toolbar: **Set region**: The data region is the part of the chart that contains series data. Defaults to the full image snip.
    - Toolbar: **Set X axis**: click twice for any pair of x-axis tick marks; enter x0/x1 values. These do not restrict what is scanned, only how values are converted from pixels to x-axis units or categories.
    - Toolbar: **Set Y axis**: click twice for any pair of y-axis pixels; enter y0/y1 values. These do not restrict what is scanned, only how values are converted from pixels to y-axis units.
    - Chart type: Line/Area/Column/Bar/Scatter supported (if you have combo charts you can change this per series).
@@ -66,15 +66,15 @@ See additional notes for running in UV and compiling your own binaries below.
    - Buttons: **Update** applies the current calibration to the active series, **Apply to...** lets you choose series to update, **Apply to all** updates all series.
 3. Toolbar: change tool to **Add series**: 
    - line/area/column/bar: click on the series color in the chart to add one series at a time to the Series list.
-   - scatter: click a marker color; Shift+drag a rectangular selection around a marker to match on shape; Ctrl+click or Ctrl+Shift+drag to add more seed locations and/or marker shapes.
+   - scatter: click a marker color to find simple solid markers. Drag a rectangle around a marker to match its shape. Ctrl+click adds more guide points; Ctrl+drag adds more shapes to the active series.
    - You can edit the parameters above between clicks.
 4. Toolbar: change tool to **Edit series** to edit:
    - Click on the individual series in the Series list
    - Drag points vertically (line mode) to adjust values.
    - Right-click a point to toggle NA (disabled).
 5. Keyboard and fine control:
-   - Arrow keys nudge the active item in the canvas (a region corner, axis tick, point, or seed).
-   - Shift+arrow moves faster; Ctrl+arrow switches which item is active.
+   - Arrow keys nudge the active item in the canvas (a data region corner, axis tick, point, or seed).
+   - Shift+arrow moves faster; Ctrl+arrow cycles which item is active.
    - Enter / Shift+Enter switches tools forward/backward.
    - You can drag the tick labels in **Set X axis** / **Set Y axis** to move the tick positions.
    - You can drag seed markers in **Add series** / **Edit series** to move the seed and re-extract.
